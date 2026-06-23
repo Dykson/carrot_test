@@ -6,7 +6,7 @@ This repository contains a small C++17 implementation of an educational MJPEG-li
 
 - `carrot::MjpegEncoder` reads a folder of lexicographically sorted `.png` frames and writes an `SMJ1` movie file.
 - `carrot::MjpegDecoder` reads an `SMJ1` movie file, reconstructs raster frames, and can write them back as PNG files.
-- PNG reading and writing is delegated to `libpng`; video compression and decompression are implemented in this project.
+- PNG reading and writing is delegated to `stb_image` / `stb_image_write`; video compression and decompression are implemented in this project.
 
 ## Compression pipeline
 

@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-find_package(PNG REQUIRED)
+find_package(ZLIB REQUIRED)
 
 add_library(carrot_mjpeg
     src/BitStream.cpp
@@ -13,8 +13,8 @@ add_library(carrot_mjpeg
     src/MjpegCodec.cpp
     src/PngIo.cpp
 )
-target_include_directories(carrot_mjpeg PUBLIC include)
-target_link_libraries(carrot_mjpeg PUBLIC PNG::PNG)
+target_include_directories(carrot_mjpeg PUBLIC include third_party/stb)
+target_link_libraries(carrot_mjpeg PUBLIC ZLIB::ZLIB)
 
 enable_testing()
 add_executable(mjpeg_tests tests/MjpegCodecTests.cpp)
