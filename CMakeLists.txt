@@ -5,6 +5,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+set(SDL3_DIR
+    "${CMAKE_SOURCE_DIR}/third_party/SDL3-3.4.10/cmake")
+
 find_package(SDL3 QUIET)
 find_package(OpenGL QUIET)
 find_package(glad QUIET)
@@ -13,7 +16,6 @@ add_library(carrot_codecs
     src/ima_adpcm.cpp
     src/mjpeg.cpp
     src/wav.cpp
-    src/stb.cpp
 )
 target_include_directories(carrot_codecs PUBLIC include third_party/stb)
 target_compile_options(carrot_codecs PRIVATE

@@ -23,14 +23,19 @@
 
 namespace {
 
-struct AudioState {
-    const uint8_t* data = nullptr;
+struct AudioState
+{
+    const uint8_t *data = nullptr;
     uint32_t byte_count = 0;
     std::atomic<uint32_t> cursor{0};
 };
 
-void audio_callback(void* userdata, SDL_AudioStream* stream, int additional_amount, int /*total_amount*/) {
-    auto* state = static_cast<AudioState*>(userdata);
+void audio_callback(void *userdata,
+                    SDL_AudioStream *stream,
+                    int additional_amount,
+                    int /*total_amount*/)
+{
+    auto *state = static_cast<AudioState *>(userdata);
 
     if (additional_amount <= 0) {
         return;
@@ -42,12 +47,14 @@ void audio_callback(void* userdata, SDL_AudioStream* stream, int additional_amou
     }
 
     const uint32_t available = state->byte_count - cursor;
-    const uint32_t bytes_to_copy = std::min<uint32_t>(available, static_cast<uint32_t>(additional_amount));
+    const uint32_t bytes_to_copy = std::min<uint32_t>(available,
+                                                      static_cast<uint32_t>(additional_amount));
     SDL_PutAudioStreamData(stream, state->data + cursor, static_cast<int>(bytes_to_copy));
     state->cursor.store(cursor + bytes_to_copy, std::memory_order_relaxed);
 }
 
-GLuint create_texture(const carrot::ImageRgb& first_frame) {
+GLuint create_texture(const carrot::ImageRgb &first_frame)
+{
     GLuint texture = 0;
     glGenTextures(1, &texture);
     glBindTexture(GL_TEXTURE_2D, texture);
@@ -55,20 +62,20 @@ GLuint create_texture(const carrot::ImageRgb& first_frame) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexImage2D(
-        GL_TEXTURE_2D,
-        0,
-        GL_RGB8,
-        first_frame.width,
-        first_frame.height,
-        0,
-        GL_RGB,
-        GL_UNSIGNED_BYTE,
-        first_frame.pixels.data());
+    glTexImage2D(GL_TEXTURE_2D,
+                 0,
+                 GL_RGB8,
+                 first_frame.width,
+                 first_frame.height,
+                 0,
+                 GL_RGB,
+                 GL_UNSIGNED_BYTE,
+                 first_frame.pixels.data());
     return texture;
 }
 
-void draw_textured_fullscreen_quad(GLuint texture) {
+void draw_textured_fullscreen_quad(GLuint texture)
+{
     glClear(GL_COLOR_BUFFER_BIT);
     glEnable(GL_TEXTURE_2D);
     glBindTexture(GL_TEXTURE_2D, texture);
@@ -88,26 +95,29 @@ void draw_textured_fullscreen_quad(GLuint texture) {
     glEnd();
 }
 
-std::vector<carrot::ImageRgb> load_decoded_frames(const std::string& folder) {
+std::vector<carrot::ImageRgb> load_decoded_frames(const std::string &folder)
+{
     const std::vector<carrot::MjpegFrame> encoded_frames = carrot::encode_folder(folder, 50);
     const carrot::MjpegDecoder decoder;
     std::vector<carrot::ImageRgb> decoded_frames;
     decoded_frames.reserve(encoded_frames.size());
 
-    for (const carrot::MjpegFrame& encoded_frame : encoded_frames) {
+    for (const carrot::MjpegFrame &encoded_frame : encoded_frames) {
         decoded_frames.push_back(decoder.decode(encoded_frame));
     }
 
     return decoded_frames;
 }
 
-void print_usage() {
+void print_usage()
+{
     std::cout << "Usage: codec_tool player <audio.wav> <png_frames_folder> [fps]\n";
 }
 
-}  // namespace
+} // namespace
 
-int carrot::run_player(int argc, char** argv) {
+int carrot::run_player(int argc, char **argv)
+{
     if (argc < 3) {
         print_usage();
         return 0;
@@ -121,7 +131,8 @@ int carrot::run_player(int argc, char** argv) {
         carrot::WavPcm wav = carrot::read_wav_pcm16(audio_path);
         const carrot::ImaAdpcmEncoder audio_encoder;
         const carrot::ImaAdpcmDecoder audio_decoder;
-        wav.samples = audio_decoder.decode(audio_encoder.encode(wav.samples, wav.channels), wav.channels);
+        wav.samples = audio_decoder.decode(audio_encoder.encode(wav.samples, wav.channels),
+                                           wav.channels);
 
         std::vector<carrot::ImageRgb> frames = load_decoded_frames(frames_folder);
         if (frames.empty()) {
@@ -137,11 +148,10 @@ int carrot::run_player(int argc, char** argv) {
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
         SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-        SDL_Window* window = SDL_CreateWindow(
-            "Carrot codec player",
-            frames.front().width,
-            frames.front().height,
-            SDL_WINDOW_OPENGL);
+        SDL_Window *window = SDL_CreateWindow("Carrot codec player",
+                                              frames.front().width,
+                                              frames.front().height,
+                                              SDL_WINDOW_OPENGL);
         if (window == nullptr) {
             throw std::runtime_error(SDL_GetError());
         }
@@ -158,7 +168,7 @@ int carrot::run_player(int argc, char** argv) {
         SDL_GL_SetSwapInterval(1);
 
         AudioState audio_state;
-        audio_state.data = reinterpret_cast<const uint8_t*>(wav.samples.data());
+        audio_state.data = reinterpret_cast<const uint8_t *>(wav.samples.data());
         audio_state.byte_count = static_cast<uint32_t>(wav.samples.size() * sizeof(int16_t));
 
         SDL_AudioSpec desired{};
@@ -166,11 +176,10 @@ int carrot::run_player(int argc, char** argv) {
         desired.format = SDL_AUDIO_S16;
         desired.channels = static_cast<int>(wav.channels);
 
-        SDL_AudioStream* audio_stream = SDL_OpenAudioDeviceStream(
-            SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
-            &desired,
-            audio_callback,
-            &audio_state);
+        SDL_AudioStream *audio_stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
+                                                                  &desired,
+                                                                  audio_callback,
+                                                                  &audio_state);
         if (audio_stream == nullptr) {
             throw std::runtime_error(SDL_GetError());
         }
@@ -184,32 +193,34 @@ int carrot::run_player(int argc, char** argv) {
         while (running) {
             SDL_Event event{};
             while (SDL_PollEvent(&event) != 0) {
-                if (event.type == SDL_EVENT_QUIT || (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE)) {
+                if (event.type == SDL_EVENT_QUIT
+                    || (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE)) {
                     running = false;
                 }
             }
 
             const auto now = std::chrono::steady_clock::now();
             const double seconds = std::chrono::duration<double>(now - start_time).count();
-            const size_t frame_index = std::min<size_t>(static_cast<size_t>(seconds * fps), frames.size() - 1);
-            const carrot::ImageRgb& frame = frames[frame_index];
+            const size_t frame_index = std::min<size_t>(static_cast<size_t>(seconds * fps),
+                                                        frames.size() - 1);
+            const carrot::ImageRgb &frame = frames[frame_index];
 
             glBindTexture(GL_TEXTURE_2D, texture);
-            glTexSubImage2D(
-                GL_TEXTURE_2D,
-                0,
-                0,
-                0,
-                frame.width,
-                frame.height,
-                GL_RGB,
-                GL_UNSIGNED_BYTE,
-                frame.pixels.data());
+            glTexSubImage2D(GL_TEXTURE_2D,
+                            0,
+                            0,
+                            0,
+                            frame.width,
+                            frame.height,
+                            GL_RGB,
+                            GL_UNSIGNED_BYTE,
+                            frame.pixels.data());
 
             draw_textured_fullscreen_quad(texture);
             SDL_GL_SwapWindow(window);
 
-            if (frame_index + 1 == frames.size() && audio_state.cursor.load(std::memory_order_relaxed) >= audio_state.byte_count) {
+            if (frame_index + 1 == frames.size()
+                && audio_state.cursor.load(std::memory_order_relaxed) >= audio_state.byte_count) {
                 running = false;
             }
 
@@ -218,11 +229,11 @@ int carrot::run_player(int argc, char** argv) {
 
         SDL_DestroyAudioStream(audio_stream);
         glDeleteTextures(1, &texture);
-        SDL_GL_DeleteContext(gl_context);
+        SDL_GL_DestroyContext(gl_context);
         SDL_DestroyWindow(window);
         SDL_Quit();
         return 0;
-    } catch (const std::exception& error) {
+    } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
         SDL_Quit();
         return 1;
