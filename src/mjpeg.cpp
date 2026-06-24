@@ -4,6 +4,7 @@
 #include "stb_image_write.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <filesystem>
 #include <stdexcept>
@@ -13,7 +14,29 @@ namespace carrot {
 namespace {
 
 constexpr double kPi = 3.14159265358979323846;
+constexpr double kInvSqrt2 = 0.70710678118654752440;
 constexpr int kBlockSize = 8;
+
+using DctBasis = std::array<std::array<double, kBlockSize>, kBlockSize>;
+
+const DctBasis& dct_basis() {
+    static const DctBasis basis = [] {
+        DctBasis table{};
+        for (int frequency = 0; frequency < kBlockSize; ++frequency) {
+            for (int sample = 0; sample < kBlockSize; ++sample) {
+                table[frequency][sample] =
+                    std::cos((2 * sample + 1) * frequency * kPi / 16.0);
+            }
+        }
+        return table;
+    }();
+
+    return basis;
+}
+
+double dct_alpha(int frequency) {
+    return frequency == 0 ? kInvSqrt2 : 1.0;
+}
 
 int quantization_scale(int quality) {
     return std::max(1, 101 - std::clamp(quality, 1, 100));
@@ -41,37 +64,42 @@ uint8_t pixel_at_clamped(const ImageRgb& image, int x, int y, int channel) {
 }
 
 void forward_dct_block(const double input[kBlockSize][kBlockSize], double output[kBlockSize][kBlockSize]) {
+    const DctBasis& basis = dct_basis();
+
     for (int v = 0; v < kBlockSize; ++v) {
+        const double cv = dct_alpha(v);
+
         for (int u = 0; u < kBlockSize; ++u) {
+            const double cu = dct_alpha(u);
             double sum = 0.0;
 
             for (int y = 0; y < kBlockSize; ++y) {
+                const double basis_y = basis[v][y];
+
                 for (int x = 0; x < kBlockSize; ++x) {
-                    sum += input[y][x] *
-                           std::cos((2 * x + 1) * u * kPi / 16.0) *
-                           std::cos((2 * y + 1) * v * kPi / 16.0);
+                    sum += input[y][x] * basis[u][x] * basis_y;
                 }
             }
 
-            const double cu = (u == 0) ? 1.0 / std::sqrt(2.0) : 1.0;
-            const double cv = (v == 0) ? 1.0 / std::sqrt(2.0) : 1.0;
             output[v][u] = 0.25 * cu * cv * sum;
         }
     }
 }
 
 void inverse_dct_block(const double input[kBlockSize][kBlockSize], double output[kBlockSize][kBlockSize]) {
+    const DctBasis& basis = dct_basis();
+
     for (int y = 0; y < kBlockSize; ++y) {
         for (int x = 0; x < kBlockSize; ++x) {
             double sum = 0.0;
 
             for (int v = 0; v < kBlockSize; ++v) {
+                const double cv = dct_alpha(v);
+                const double basis_y = basis[v][y];
+
                 for (int u = 0; u < kBlockSize; ++u) {
-                    const double cu = (u == 0) ? 1.0 / std::sqrt(2.0) : 1.0;
-                    const double cv = (v == 0) ? 1.0 / std::sqrt(2.0) : 1.0;
-                    sum += cu * cv * input[v][u] *
-                           std::cos((2 * x + 1) * u * kPi / 16.0) *
-                           std::cos((2 * y + 1) * v * kPi / 16.0);
+                    const double cu = dct_alpha(u);
+                    sum += cu * cv * input[v][u] * basis[u][x] * basis_y;
                 }
             }
 
