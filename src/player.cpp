@@ -2,11 +2,11 @@
 #include "mjpeg.h"
 #include "wav.h"
 
-#include <SDL.h>
+#include <SDL3/SDL.h>
 #if defined(CARROT_WITH_GLAD)
 #include <glad/glad.h>
 #else
-#include <SDL_opengl.h>
+#include <SDL3/SDL_opengl.h>
 #endif
 
 #include <algorithm>
@@ -27,9 +27,12 @@ struct AudioState {
     std::atomic<uint32_t> cursor{0};
 };
 
-void audio_callback(void* userdata, uint8_t* stream, int stream_size) {
+void audio_callback(void* userdata, SDL_AudioStream* stream, int additional_amount, int /*total_amount*/) {
     auto* state = static_cast<AudioState*>(userdata);
-    SDL_memset(stream, 0, stream_size);
+
+    if (additional_amount <= 0) {
+        return;
+    }
 
     const uint32_t cursor = state->cursor.load(std::memory_order_relaxed);
     if (cursor >= state->byte_count) {
@@ -37,8 +40,8 @@ void audio_callback(void* userdata, uint8_t* stream, int stream_size) {
     }
 
     const uint32_t available = state->byte_count - cursor;
-    const uint32_t bytes_to_copy = std::min<uint32_t>(available, static_cast<uint32_t>(stream_size));
-    SDL_memcpy(stream, state->data + cursor, bytes_to_copy);
+    const uint32_t bytes_to_copy = std::min<uint32_t>(available, static_cast<uint32_t>(additional_amount));
+    SDL_PutAudioStreamData(stream, state->data + cursor, static_cast<int>(bytes_to_copy));
     state->cursor.store(cursor + bytes_to_copy, std::memory_order_relaxed);
 }
 
@@ -123,7 +126,7 @@ int main(int argc, char** argv) {
             throw std::runtime_error("no PNG frames found in: " + frames_folder);
         }
 
-        if (SDL_Init(SDL_INIT_AUDIO | SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
+        if (!SDL_Init(SDL_INIT_AUDIO | SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
             throw std::runtime_error(SDL_GetError());
         }
 
@@ -134,11 +137,9 @@ int main(int argc, char** argv) {
 
         SDL_Window* window = SDL_CreateWindow(
             "Carrot codec player",
-            SDL_WINDOWPOS_CENTERED,
-            SDL_WINDOWPOS_CENTERED,
             frames.front().width,
             frames.front().height,
-            SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN);
+            SDL_WINDOW_OPENGL);
         if (window == nullptr) {
             throw std::runtime_error(SDL_GetError());
         }
@@ -160,20 +161,20 @@ int main(int argc, char** argv) {
 
         SDL_AudioSpec desired{};
         desired.freq = static_cast<int>(wav.sample_rate);
-        desired.format = AUDIO_S16SYS;
-        desired.channels = static_cast<uint8_t>(wav.channels);
-        desired.samples = 1024;
-        desired.callback = audio_callback;
-        desired.userdata = &audio_state;
+        desired.format = SDL_AUDIO_S16;
+        desired.channels = static_cast<int>(wav.channels);
 
-        SDL_AudioSpec obtained{};
-        SDL_AudioDeviceID audio_device = SDL_OpenAudioDevice(nullptr, 0, &desired, &obtained, 0);
-        if (audio_device == 0) {
+        SDL_AudioStream* audio_stream = SDL_OpenAudioDeviceStream(
+            SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
+            &desired,
+            audio_callback,
+            &audio_state);
+        if (audio_stream == nullptr) {
             throw std::runtime_error(SDL_GetError());
         }
 
         GLuint texture = create_texture(frames.front());
-        SDL_PauseAudioDevice(audio_device, 0);
+        SDL_ResumeAudioStreamDevice(audio_stream);
 
         bool running = true;
         const auto start_time = std::chrono::steady_clock::now();
@@ -181,7 +182,7 @@ int main(int argc, char** argv) {
         while (running) {
             SDL_Event event{};
             while (SDL_PollEvent(&event) != 0) {
-                if (event.type == SDL_QUIT || (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE)) {
+                if (event.type == SDL_EVENT_QUIT || (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE)) {
                     running = false;
                 }
             }
@@ -213,7 +214,7 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
-        SDL_CloseAudioDevice(audio_device);
+        SDL_DestroyAudioStream(audio_stream);
         glDeleteTextures(1, &texture);
         SDL_GL_DeleteContext(gl_context);
         SDL_DestroyWindow(window);

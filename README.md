@@ -4,7 +4,7 @@ C++17 implementation of the requested media-coding test assignment:
 
 1. IMA ADPCM audio encode/decode.
 2. Educational MJPEG-style video encode/decode.
-3. SDL2 + OpenGL playback of decoded audio/video streams.
+3. SDL3 + OpenGL playback of decoded audio/video streams.
 
 The code intentionally keeps the codec algorithms visible and readable instead of hiding them behind FFmpeg or platform codecs.
 
@@ -18,7 +18,7 @@ cmake --build build
 Targets:
 
 * `codec_tool` is always built.
-* `simple_player` is built when CMake can find SDL2 and OpenGL development packages.
+* `simple_player` is built when CMake can find SDL3 and OpenGL development packages.
 
 ## Usage
 
@@ -28,7 +28,7 @@ Targets:
 ./build/simple_player input.wav frames_png 25
 ```
 
-`simple_player` decodes the WAV through the IMA ADPCM roundtrip, decodes PNG frames through the simplified MJPEG roundtrip, plays PCM through SDL2, uploads frames into an OpenGL texture, and chooses the displayed frame from the audio/video clock time.
+`simple_player` decodes the WAV through the IMA ADPCM roundtrip, decodes PNG frames through the simplified MJPEG roundtrip, plays PCM through SDL3, uploads frames into an OpenGL texture, and chooses the displayed frame from the audio/video clock time.
 
 ## IMA ADPCM assumptions
 
@@ -64,4 +64,4 @@ The image IO layer uses the requested `stb_image.h` and `stb_image_write.h` func
 
 ## Player notes
 
-`simple_player` is implemented with SDL2 for window/audio/timing and OpenGL for presenting decoded video frames. It requests an OpenGL 4.6 compatibility context so the test player can stay compact while still exercising the expected SDL2/OpenGL integration path. When a `glad::glad` CMake target is available, the player initializes glad after creating the SDL OpenGL context. A production player would replace the compact compatibility-profile quad with a shader/VBO/VAO renderer.
+`simple_player` is implemented with SDL3 for window/audio/timing and OpenGL for presenting decoded video frames. It requests an OpenGL 4.6 compatibility context so the test player can stay compact while still exercising the expected SDL3/OpenGL integration path. When a `glad::glad` CMake target is available, the player initializes glad after creating the SDL OpenGL context. A production player would replace the compact compatibility-profile quad with a shader/VBO/VAO renderer.
