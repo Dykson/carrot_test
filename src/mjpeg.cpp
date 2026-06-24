@@ -40,6 +40,24 @@ double dct_alpha(int frequency) {
     return frequency == 0 ? kInvSqrt2 : 1.0;
 }
 
+const DctBasis& scaled_dct_basis() {
+    static const DctBasis basis = [] {
+        DctBasis table{};
+        const DctBasis& unscaled_basis = dct_basis();
+
+        for (int frequency = 0; frequency < kBlockSize; ++frequency) {
+            const double scale = 0.5 * dct_alpha(frequency);
+            for (int sample = 0; sample < kBlockSize; ++sample) {
+                table[frequency][sample] = scale * unscaled_basis[frequency][sample];
+            }
+        }
+
+        return table;
+    }();
+
+    return basis;
+}
+
 int quantization_scale(int quality) {
     return std::max(1, 101 - std::clamp(quality, 1, 100));
 }
@@ -66,24 +84,37 @@ uint8_t pixel_at_clamped(const ImageRgb& image, int x, int y, int channel) {
 }
 
 void forward_dct_block(const double input[kBlockSize][kBlockSize], double output[kBlockSize][kBlockSize]) {
-    const DctBasis& basis = dct_basis();
+    const DctBasis& basis = scaled_dct_basis();
+    double row_transformed[kBlockSize][kBlockSize]{};
+
+    for (int y = 0; y < kBlockSize; ++y) {
+        for (int u = 0; u < kBlockSize; ++u) {
+            const auto& basis_u = basis[u];
+            row_transformed[y][u] =
+                input[y][0] * basis_u[0] +
+                input[y][1] * basis_u[1] +
+                input[y][2] * basis_u[2] +
+                input[y][3] * basis_u[3] +
+                input[y][4] * basis_u[4] +
+                input[y][5] * basis_u[5] +
+                input[y][6] * basis_u[6] +
+                input[y][7] * basis_u[7];
+        }
+    }
 
     for (int v = 0; v < kBlockSize; ++v) {
-        const double cv = dct_alpha(v);
+        const auto& basis_v = basis[v];
 
         for (int u = 0; u < kBlockSize; ++u) {
-            const double cu = dct_alpha(u);
-            double sum = 0.0;
-
-            for (int y = 0; y < kBlockSize; ++y) {
-                const double basis_y = basis[v][y];
-
-                for (int x = 0; x < kBlockSize; ++x) {
-                    sum += input[y][x] * basis[u][x] * basis_y;
-                }
-            }
-
-            output[v][u] = 0.25 * cu * cv * sum;
+            output[v][u] =
+                row_transformed[0][u] * basis_v[0] +
+                row_transformed[1][u] * basis_v[1] +
+                row_transformed[2][u] * basis_v[2] +
+                row_transformed[3][u] * basis_v[3] +
+                row_transformed[4][u] * basis_v[4] +
+                row_transformed[5][u] * basis_v[5] +
+                row_transformed[6][u] * basis_v[6] +
+                row_transformed[7][u] * basis_v[7];
         }
     }
 }
