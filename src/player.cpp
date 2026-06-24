@@ -1,3 +1,5 @@
+#include "player.h"
+
 #include "ima_adpcm.h"
 #include "mjpeg.h"
 #include "wav.h"
@@ -100,12 +102,12 @@ std::vector<carrot::ImageRgb> load_decoded_frames(const std::string& folder) {
 }
 
 void print_usage() {
-    std::cout << "Usage: simple_player <audio.wav> <png_frames_folder> [fps]\n";
+    std::cout << "Usage: codec_tool player <audio.wav> <png_frames_folder> [fps]\n";
 }
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int carrot::run_player(int argc, char** argv) {
     if (argc < 3) {
         print_usage();
         return 0;

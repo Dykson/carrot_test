@@ -2,16 +2,22 @@
 #include "mjpeg.h"
 #include "wav.h"
 
+#if defined(CARROT_WITH_PLAYER)
+#include "player.h"
+#endif
+
 #include <exception>
 #include <iostream>
 #include <string>
+#include <vector>
 
 namespace {
 
 void print_usage() {
     std::cout << "Usage:\n"
               << "  codec_tool adpcm <input.wav> <decoded.wav>\n"
-              << "  codec_tool mjpeg <png_folder> <decoded_folder>\n";
+              << "  codec_tool mjpeg <png_folder> <decoded_folder>\n"
+              << "  codec_tool player <input.wav> <png_frames_folder> [fps]\n";
 }
 
 int run_adpcm_roundtrip(const char* input_path, const char* output_path) {
@@ -31,6 +37,17 @@ int run_mjpeg_roundtrip(const char* input_folder, const char* output_folder) {
     return 0;
 }
 
+int run_player_mode(int argc, char** argv) {
+#if defined(CARROT_WITH_PLAYER)
+    return carrot::run_player(argc - 1, argv + 1);
+#else
+    (void)argc;
+    (void)argv;
+    std::cerr << "player mode is unavailable: rebuild with SDL3 and OpenGL development packages\n";
+    return 3;
+#endif
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -47,6 +64,10 @@ int main(int argc, char** argv) {
 
         if (mode == "mjpeg" && argc == 4) {
             return run_mjpeg_roundtrip(argv[2], argv[3]);
+        }
+
+        if (mode == "player" && argc >= 4) {
+            return run_player_mode(argc, argv);
         }
 
         print_usage();
