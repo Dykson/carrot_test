@@ -30,27 +30,42 @@ struct AudioState
     std::atomic<uint32_t> cursor{0};
 };
 
-void audio_callback(void *userdata,
-                    SDL_AudioStream *stream,
-                    int additional_amount,
-                    int /*total_amount*/)
+static void audio_callback(void *userdata,
+                           SDL_AudioStream *stream,
+                           int additional_amount,
+                           int /*total_amount*/)
 {
     auto *state = static_cast<AudioState *>(userdata);
 
-    if (additional_amount <= 0) {
+    if (state == nullptr || state->data == nullptr || state->byte_count == 0) {
         return;
     }
 
-    const uint32_t cursor = state->cursor.load(std::memory_order_relaxed);
-    if (cursor >= state->byte_count) {
-        return;
-    }
+    int bytes_to_write = additional_amount;
 
-    const uint32_t available = state->byte_count - cursor;
-    const uint32_t bytes_to_copy = std::min<uint32_t>(available,
-                                                      static_cast<uint32_t>(additional_amount));
-    SDL_PutAudioStreamData(stream, state->data + cursor, static_cast<int>(bytes_to_copy));
-    state->cursor.store(cursor + bytes_to_copy, std::memory_order_relaxed);
+    while (bytes_to_write > 0) {
+        uint32_t cursor = state->cursor.load(std::memory_order_relaxed);
+
+        if (cursor >= state->byte_count) {
+            cursor = 0;
+        }
+
+        const uint32_t bytes_left_until_loop = state->byte_count - cursor;
+        const uint32_t chunk_size = std::min<uint32_t>(static_cast<uint32_t>(bytes_to_write),
+                                                       bytes_left_until_loop);
+
+        SDL_PutAudioStreamData(stream, state->data + cursor, static_cast<int>(chunk_size));
+
+        cursor += chunk_size;
+
+        if (cursor >= state->byte_count) {
+            cursor = 0;
+        }
+
+        state->cursor.store(cursor, std::memory_order_relaxed);
+
+        bytes_to_write -= static_cast<int>(chunk_size);
+    }
 }
 
 GLuint create_texture(const carrot::ImageRgb &first_frame)
@@ -97,7 +112,7 @@ void draw_textured_fullscreen_quad(GLuint texture)
 
 std::vector<carrot::ImageRgb> load_decoded_frames(const std::string &folder)
 {
-    const std::vector<carrot::MjpegFrame> encoded_frames = carrot::encode_folder(folder, 50);
+    const std::vector<carrot::MjpegFrame> encoded_frames = carrot::encode_folder(folder, 100);
     const carrot::MjpegDecoder decoder;
     std::vector<carrot::ImageRgb> decoded_frames;
     decoded_frames.reserve(encoded_frames.size());
@@ -201,8 +216,9 @@ int carrot::run_player(int argc, char **argv)
 
             const auto now = std::chrono::steady_clock::now();
             const double seconds = std::chrono::duration<double>(now - start_time).count();
-            const size_t frame_index = std::min<size_t>(static_cast<size_t>(seconds * fps),
-                                                        frames.size() - 1);
+
+            const size_t frame_index = static_cast<size_t>(seconds * fps) % frames.size();
+
             const carrot::ImageRgb &frame = frames[frame_index];
 
             glBindTexture(GL_TEXTURE_2D, texture);
@@ -218,11 +234,6 @@ int carrot::run_player(int argc, char **argv)
 
             draw_textured_fullscreen_quad(texture);
             SDL_GL_SwapWindow(window);
-
-            if (frame_index + 1 == frames.size()
-                && audio_state.cursor.load(std::memory_order_relaxed) >= audio_state.byte_count) {
-                running = false;
-            }
 
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
