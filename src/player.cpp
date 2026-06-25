@@ -26,7 +26,9 @@ struct AudioState
 {
     const uint8_t *data = nullptr;
     uint32_t byte_count = 0;
+    uint32_t bytes_per_second = 0;
     std::atomic<uint32_t> cursor{0};
+    std::atomic<uint64_t> bytes_written{0};
 };
 
 static void audio_callback(void *userdata,
@@ -62,6 +64,7 @@ static void audio_callback(void *userdata,
         }
 
         state->cursor.store(cursor, std::memory_order_relaxed);
+        state->bytes_written.fetch_add(chunk_size, std::memory_order_relaxed);
 
         bytes_to_write -= static_cast<int>(chunk_size);
     }
@@ -196,6 +199,20 @@ Renderer create_renderer(const carrot::ImageRgb &first_frame)
     return renderer;
 }
 
+
+double audio_clock_seconds(const AudioState &state, SDL_AudioStream *stream)
+{
+    if (state.bytes_per_second == 0) {
+        return 0.0;
+    }
+
+    const uint64_t written = state.bytes_written.load(std::memory_order_relaxed);
+    const int queued = std::max(0, SDL_GetAudioStreamQueued(stream));
+    const uint64_t queued_bytes = static_cast<uint64_t>(queued);
+    const uint64_t played = written > queued_bytes ? written - queued_bytes : 0;
+    return static_cast<double>(played) / static_cast<double>(state.bytes_per_second);
+}
+
 void draw_textured_fullscreen_quad(const Renderer &renderer)
 {
     glClear(GL_COLOR_BUFFER_BIT);
@@ -284,6 +301,7 @@ int carrot::run_player(int argc, char **argv)
         AudioState audio_state;
         audio_state.data = reinterpret_cast<const uint8_t *>(wav.samples.data());
         audio_state.byte_count = static_cast<uint32_t>(wav.samples.size() * sizeof(int16_t));
+        audio_state.bytes_per_second = wav.sample_rate * wav.channels * sizeof(int16_t);
 
         SDL_AudioSpec desired{};
         desired.freq = static_cast<int>(wav.sample_rate);
@@ -299,10 +317,16 @@ int carrot::run_player(int argc, char **argv)
         }
 
         Renderer renderer = create_renderer(frames.front());
+
+        draw_textured_fullscreen_quad(renderer);
+        SDL_GL_SwapWindow(window);
+
+        SDL_ClearAudioStream(audio_stream);
+        audio_state.cursor.store(0, std::memory_order_relaxed);
+        audio_state.bytes_written.store(0, std::memory_order_relaxed);
         SDL_ResumeAudioStreamDevice(audio_stream);
 
         bool running = true;
-        const auto start_time = std::chrono::steady_clock::now();
 
         while (running) {
             SDL_Event event{};
@@ -313,8 +337,7 @@ int carrot::run_player(int argc, char **argv)
                 }
             }
 
-            const auto now = std::chrono::steady_clock::now();
-            const double seconds = std::chrono::duration<double>(now - start_time).count();
+            const double seconds = audio_clock_seconds(audio_state, audio_stream);
 
             const size_t frame_index = static_cast<size_t>(seconds * fps) % frames.size();
 
