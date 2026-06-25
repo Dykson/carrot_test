@@ -7,10 +7,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(SDL3_DIR
     "${CMAKE_SOURCE_DIR}/third_party/SDL3-3.4.10/cmake")
-
+include_directories("third_party/glad-4.6/include")
 find_package(SDL3 QUIET)
-find_package(OpenGL QUIET)
-find_package(glad QUIET)
 
 add_library(carrot_codecs
     src/ima_adpcm.cpp
@@ -26,14 +24,10 @@ target_compile_options(carrot_codecs PRIVATE
 add_executable(codec_tool src/main.cpp)
 target_link_libraries(codec_tool PRIVATE carrot_codecs)
 
-if(SDL3_FOUND AND OpenGL_FOUND)
+if(SDL3_FOUND)
     target_sources(codec_tool PRIVATE src/player.cpp)
-    target_link_libraries(codec_tool PRIVATE SDL3::SDL3 OpenGL::GL)
+    target_link_libraries(codec_tool PRIVATE SDL3::SDL3)
     target_compile_definitions(codec_tool PRIVATE CARROT_WITH_PLAYER=1)
-    if(TARGET glad::glad)
-        target_link_libraries(codec_tool PRIVATE glad::glad)
-        target_compile_definitions(codec_tool PRIVATE CARROT_WITH_GLAD=1)
-    endif()
 else()
-    message(STATUS "SDL3/OpenGL were not found: codec_tool player mode will be disabled")
+    message(STATUS "SDL3/OpenGL/glad were not found: codec_tool player mode will be disabled")
 endif()
