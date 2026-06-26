@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <stdexcept>
 #include <string>
 
@@ -25,6 +26,13 @@ int quantization_scale(int quality) {
 void write_i16(std::vector<uint8_t>& output, int value) {
     output.push_back(static_cast<uint8_t>(value & 0xFF));
     output.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
+}
+
+void write_u32(std::ostream& stream, uint32_t value) {
+    stream.put(static_cast<char>(value & 0xFF));
+    stream.put(static_cast<char>((value >> 8) & 0xFF));
+    stream.put(static_cast<char>((value >> 16) & 0xFF));
+    stream.put(static_cast<char>((value >> 24) & 0xFF));
 }
 
 int16_t read_i16(const std::vector<uint8_t>& input, size_t& offset) {
@@ -125,6 +133,56 @@ double component_at_clamped(const std::vector<double>& component, int width, int
     return component[static_cast<size_t>(clamped_y * width + clamped_x)];
 }
 
+void write_rle_block(std::vector<uint8_t>& bitstream, const double coefficients[kBlockSize][kBlockSize], int q) {
+    uint8_t zero_run = 0;
+
+    for (int v = 0; v < kBlockSize; ++v) {
+        for (int u = 0; u < kBlockSize; ++u) {
+            const int quantized = static_cast<int>(std::lround(coefficients[v][u] / q));
+            if (quantized == 0) {
+                ++zero_run;
+                continue;
+            }
+
+            bitstream.push_back(zero_run);
+            write_i16(bitstream, quantized);
+            zero_run = 0;
+        }
+    }
+
+    if (zero_run > 0) {
+        bitstream.push_back(255);  // end of block: remaining coefficients are zero.
+    }
+}
+
+void read_rle_block(const std::vector<uint8_t>& bitstream,
+                    size_t& offset,
+                    int q,
+                    double coefficients[kBlockSize][kBlockSize]) {
+    int coefficient_index = 0;
+    std::fill(&coefficients[0][0], &coefficients[0][0] + kBlockSize * kBlockSize, 0.0);
+
+    while (coefficient_index < kBlockSize * kBlockSize) {
+        if (offset >= bitstream.size()) {
+            throw std::runtime_error("truncated simplified MJPEG RLE stream");
+        }
+
+        const uint8_t zero_run = bitstream[offset++];
+        if (zero_run == 255) {
+            break;
+        }
+
+        coefficient_index += zero_run;
+        if (coefficient_index >= kBlockSize * kBlockSize) {
+            throw std::runtime_error("bad simplified MJPEG RLE run");
+        }
+
+        const int16_t value = read_i16(bitstream, offset);
+        coefficients[coefficient_index / kBlockSize][coefficient_index % kBlockSize] = value * q;
+        ++coefficient_index;
+    }
+}
+
 void encode_component(std::vector<uint8_t>& bitstream,
                       const std::vector<double>& component,
                       int width,
@@ -143,11 +201,7 @@ void encode_component(std::vector<uint8_t>& bitstream,
 
             forward_dct_block(samples, coefficients);
 
-            for (int v = 0; v < kBlockSize; ++v) {
-                for (int u = 0; u < kBlockSize; ++u) {
-                    write_i16(bitstream, static_cast<int>(std::lround(coefficients[v][u] / q)));
-                }
-            }
+            write_rle_block(bitstream, coefficients, q);
         }
     }
 }
@@ -159,11 +213,7 @@ std::vector<double> decode_component(const MjpegFrame& frame, size_t& offset, in
 
     for (int block_y = 0; block_y < height; block_y += kBlockSize) {
         for (int block_x = 0; block_x < width; block_x += kBlockSize) {
-            for (int v = 0; v < kBlockSize; ++v) {
-                for (int u = 0; u < kBlockSize; ++u) {
-                    coefficients[v][u] = read_i16(frame.bitstream, offset) * q;
-                }
-            }
+            read_rle_block(frame.bitstream, offset, q, coefficients);
 
             inverse_dct_block(coefficients, samples);
 
@@ -337,7 +387,7 @@ MjpegFrame MjpegEncoder::encode(const ImageRgb& image) const {
     const std::vector<double> chroma_red = make_subsampled_chroma_component(image, true);
 
     MjpegFrame frame{image.width, image.height, {}};
-    frame.bitstream.insert(frame.bitstream.end(), {'S', 'J', 'P', '2', static_cast<uint8_t>(q)});
+    frame.bitstream.insert(frame.bitstream.end(), {'S', 'J', 'R', '2', static_cast<uint8_t>(q)});
 
     encode_component(frame.bitstream, luma, image.width, image.height, q);
     encode_component(frame.bitstream, chroma_blue, chroma_width, chroma_height, q);
@@ -347,7 +397,7 @@ MjpegFrame MjpegEncoder::encode(const ImageRgb& image) const {
 }
 
 ImageRgb MjpegDecoder::decode(const MjpegFrame& frame) const {
-    if (frame.bitstream.size() < 5 || std::string(reinterpret_cast<const char*>(frame.bitstream.data()), 4) != "SJP2") {
+    if (frame.bitstream.size() < 5 || std::string(reinterpret_cast<const char*>(frame.bitstream.data()), 4) != "SJR2") {
         throw std::runtime_error("bad simplified MJPEG stream");
     }
 
@@ -424,6 +474,25 @@ void decode_folder(const std::vector<MjpegFrame>& frames, const std::string& fol
     for (size_t frame_index = 0; frame_index < frames.size(); ++frame_index) {
         const std::string path = folder + "/frame_" + std::to_string(frame_index) + ".png";
         save_png_rgb(path, decoder.decode(frames[frame_index]));
+    }
+}
+
+
+void write_mjpeg_stream(const std::string& path, const std::vector<MjpegFrame>& frames) {
+    std::ofstream file(path, std::ios::binary);
+    if (!file) {
+        throw std::runtime_error("cannot create MJPEG file: " + path);
+    }
+
+    file.write("CMJ2", 4);
+    write_u32(file, static_cast<uint32_t>(frames.size()));
+
+    for (const MjpegFrame& frame : frames) {
+        write_u32(file, static_cast<uint32_t>(frame.width));
+        write_u32(file, static_cast<uint32_t>(frame.height));
+        write_u32(file, static_cast<uint32_t>(frame.bitstream.size()));
+        file.write(reinterpret_cast<const char*>(frame.bitstream.data()),
+                   static_cast<std::streamsize>(frame.bitstream.size()));
     }
 }
 

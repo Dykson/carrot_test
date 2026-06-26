@@ -28,6 +28,11 @@ Targets:
 ./build/codec_tool player input.wav frames_png 25
 ```
 
+Intermediate encoded assets are saved under `media/` when running the command-line roundtrips or player smoke path:
+
+* `media/audio.adpcm` stores the IMA ADPCM channel blocks.
+* `media/video.mjpeg` stores the encoded MJPEG frame stream.
+
 `codec_tool player` decodes the WAV through the IMA ADPCM roundtrip, decodes PNG frames through the simplified MJPEG roundtrip, plays PCM through SDL3, uploads frames into an OpenGL texture, and chooses the displayed frame from the audio/video clock time.
 
 ## IMA ADPCM assumptions
@@ -47,14 +52,14 @@ This is deliberately not a complete JPEG/JFIF writer. It demonstrates the algori
 * Every component is processed in 8x8 blocks and level-shifted by 128.
 * Forward DCT is applied to every block/component.
 * Coefficients are quantized with one quality-dependent scalar.
-* Quantized coefficients are written into a compact educational `SJP2` stream.
+* Quantized coefficients are run-length encoded and written into a compact educational `SJR2` stream.
 * The decoder performs inverse quantization, IDCT, chroma upsampling, and YCbCr-to-RGB conversion.
 
 Deliberate simplifications:
 
 * no JPEG marker syntax, JFIF/EXIF metadata, restart intervals, or progressive scans;
 * no Huffman table generation and no entropy-coded scan segments;
-* no zig-zag ordering or run-length coding;
+* no zig-zag ordering or Huffman entropy coding;
 * fixed 4:2:0 chroma subsampling rather than arbitrary JPEG sampling factors;
 * no separate luminance/chrominance quantization matrices.
 

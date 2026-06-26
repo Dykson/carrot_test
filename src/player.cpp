@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cstdint>
 #include <exception>
+#include <filesystem>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -233,6 +234,8 @@ void destroy_renderer(const Renderer &renderer)
 std::vector<carrot::ImageRgb> load_decoded_frames(const std::string &folder)
 {
     const std::vector<carrot::MjpegFrame> encoded_frames = carrot::encode_folder(folder, 100);
+    std::filesystem::create_directories("media");
+    carrot::write_mjpeg_stream("media/video.mjpeg", encoded_frames);
     const carrot::MjpegDecoder decoder;
     std::vector<carrot::ImageRgb> decoded_frames;
     decoded_frames.reserve(encoded_frames.size());
@@ -266,8 +269,14 @@ int carrot::run_player(int argc, char **argv)
         carrot::WavPcm wav = carrot::read_wav_pcm16(audio_path);
         const carrot::ImaAdpcmEncoder audio_encoder;
         const carrot::ImaAdpcmDecoder audio_decoder;
-        wav.samples = audio_decoder.decode(audio_encoder.encode(wav.samples, wav.channels),
-                                           wav.channels);
+        const std::vector<carrot::ImaAdpcmBlock> encoded_audio = audio_encoder.encode(wav.samples,
+                                                                                      wav.channels);
+        std::filesystem::create_directories("media");
+        carrot::write_ima_adpcm_stream("media/audio.adpcm",
+                                       encoded_audio,
+                                       wav.channels,
+                                       wav.sample_rate);
+        wav.samples = audio_decoder.decode(encoded_audio, wav.channels);
 
         std::vector<carrot::ImageRgb> frames = load_decoded_frames(frames_folder);
         if (frames.empty()) {

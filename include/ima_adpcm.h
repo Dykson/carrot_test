@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace carrot {
@@ -10,4 +11,5 @@ public: std::vector<ImaAdpcmBlock> encode(const std::vector<int16_t>& interleave
 class ImaAdpcmDecoder {
 public: std::vector<int16_t> decode(const std::vector<ImaAdpcmBlock>& blocks, uint16_t channels) const;
 };
+void write_ima_adpcm_stream(const std::string& path, const std::vector<ImaAdpcmBlock>& blocks, uint16_t channels, uint32_t sample_rate);
 }
