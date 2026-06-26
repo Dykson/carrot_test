@@ -286,7 +286,8 @@ void print_diagnostics_if_due(const PlaybackState &playback, DiagnosticsState &d
               << "Video PTS: " << playback.video_pts << '\n'
               << std::setprecision(1)
               << "AV Delta: " << (playback.av_delta_ms >= 0.0 ? "+" : "")
-              << playback.av_delta_ms << " ms\n";
+              << playback.av_delta_ms << " ms\n"
+              << std::flush;
 
     diagnostics.last_report = now;
     diagnostics.rendered_frames = 0;
