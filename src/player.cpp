@@ -12,6 +12,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
@@ -86,6 +87,7 @@ struct PlaybackState
     const AudioState &audio_state;
     SDL_AudioStream *audio_stream = nullptr;
     double fps = 25.0;
+    double loop_duration = 0.0;
     size_t current_frame = 0;
     double audio_pts = 0.0;
     double video_pts = 0.0;
@@ -97,6 +99,7 @@ struct DiagnosticsState
     using Clock = std::chrono::steady_clock;
     Clock::time_point last_report = Clock::now();
     uint64_t rendered_frames = 0;
+    bool has_printed_report = false;
 };
 
 GLuint compile_shader(GLenum type, const char *source)
@@ -278,24 +281,32 @@ void print_diagnostics_if_due(const PlaybackState &playback, DiagnosticsState &d
     }
 
     const double measured_fps = static_cast<double>(diagnostics.rendered_frames) / elapsed.count();
+    if (diagnostics.has_printed_report) {
+        std::cout << "\033[5F";
+    }
+
     std::cout << std::fixed << std::setprecision(2)
-              << "FPS: " << measured_fps << '\n'
-              << "Frame: " << playback.current_frame << '\n'
+              << "\033[2KFPS: " << measured_fps << '\n'
+              << "\033[2KFrame: " << playback.current_frame << '\n'
               << std::setprecision(3)
-              << "Audio PTS: " << playback.audio_pts << '\n'
-              << "Video PTS: " << playback.video_pts << '\n'
+              << "\033[2KAudio PTS: " << playback.audio_pts << '\n'
+              << "\033[2KVideo PTS: " << playback.video_pts << '\n'
               << std::setprecision(1)
-              << "AV Delta: " << (playback.av_delta_ms >= 0.0 ? "+" : "")
+              << "\033[2KAV Delta: " << (playback.av_delta_ms >= 0.0 ? "+" : "")
               << playback.av_delta_ms << " ms\n"
               << std::flush;
 
+    diagnostics.has_printed_report = true;
     diagnostics.last_report = now;
     diagnostics.rendered_frames = 0;
 }
 
 void update(PlaybackState &playback)
 {
-    playback.audio_pts = audio_clock_seconds(playback.audio_state, playback.audio_stream);
+    const double raw_audio_pts = audio_clock_seconds(playback.audio_state, playback.audio_stream);
+    playback.audio_pts = playback.loop_duration > 0.0
+        ? std::fmod(raw_audio_pts, playback.loop_duration)
+        : raw_audio_pts;
 
     const size_t next_frame =
         static_cast<size_t>(playback.audio_pts * playback.fps) % playback.frames.size();
@@ -439,6 +450,7 @@ int carrot::run_player(int argc, char **argv)
 
         bool running = true;
         PlaybackState playback{frames, audio_state, audio_stream, fps};
+        playback.loop_duration = static_cast<double>(frames.size()) / fps;
         DiagnosticsState diagnostics;
 
         while (running) {
