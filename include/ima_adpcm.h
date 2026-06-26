@@ -4,7 +4,12 @@
 #include <vector>
 
 namespace carrot {
-struct ImaAdpcmBlock { int16_t predictor{}; uint8_t step_index{}; std::vector<uint8_t> nibbles; };
+struct ImaAdpcmBlock {
+    int16_t predictor{};
+    uint8_t step_index{};
+    uint32_t sample_count{};  // Exact number of PCM samples represented by this channel block.
+    std::vector<uint8_t> nibbles;
+};
 class ImaAdpcmEncoder {
 public: std::vector<ImaAdpcmBlock> encode(const std::vector<int16_t>& interleaved_pcm, uint16_t channels) const;
 };

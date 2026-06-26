@@ -16,6 +16,7 @@
 #include <exception>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -309,7 +310,13 @@ int carrot::run_player(int argc, char **argv)
 
         AudioState audio_state;
         audio_state.data = reinterpret_cast<const uint8_t *>(wav.samples.data());
+        if (wav.samples.size() > std::numeric_limits<uint32_t>::max() / sizeof(int16_t)) {
+            throw std::runtime_error("decoded audio buffer is too large for SDL callback state");
+        }
         audio_state.byte_count = static_cast<uint32_t>(wav.samples.size() * sizeof(int16_t));
+        if (wav.channels == 0 || wav.sample_rate > std::numeric_limits<uint32_t>::max() / (static_cast<uint32_t>(wav.channels) * sizeof(int16_t))) {
+            throw std::runtime_error("audio byte rate overflow");
+        }
         audio_state.bytes_per_second = wav.sample_rate * wav.channels * sizeof(int16_t);
 
         SDL_AudioSpec desired{};

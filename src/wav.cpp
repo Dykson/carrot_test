@@ -1,6 +1,7 @@
 #include "wav.h"
 
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -97,9 +98,21 @@ void write_wav_pcm16(const std::string& path, const WavPcm& wav) {
         throw std::runtime_error("cannot create WAV file: " + path);
     }
 
-    const uint16_t block_align = static_cast<uint16_t>(wav.channels * sizeof(int16_t));
+    if (wav.channels == 0 || wav.channels > std::numeric_limits<uint16_t>::max() / sizeof(int16_t)) {
+        throw std::runtime_error("invalid WAV channel count");
+    }
+    if (wav.samples.size() > std::numeric_limits<uint32_t>::max() / sizeof(int16_t)) {
+        throw std::runtime_error("WAV data is too large");
+    }
+    const uint16_t block_align = static_cast<uint16_t>(static_cast<size_t>(wav.channels) * sizeof(int16_t));
+    if (wav.sample_rate > std::numeric_limits<uint32_t>::max() / block_align) {
+        throw std::runtime_error("WAV byte rate overflow");
+    }
     const uint32_t byte_rate = wav.sample_rate * block_align;
     const uint32_t data_size = static_cast<uint32_t>(wav.samples.size() * sizeof(int16_t));
+    if (data_size > std::numeric_limits<uint32_t>::max() - 36U) {
+        throw std::runtime_error("WAV RIFF size overflow");
+    }
     const uint32_t riff_size = 36 + data_size;
 
     file.write("RIFF", 4);
