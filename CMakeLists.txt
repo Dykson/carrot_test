@@ -31,6 +31,7 @@ if(CARROT_BUILD_SELFTEST)
 endif()
 
 if(CARROT_BUILD_PLAYER)
+    set(SDL3_DIR "${CMAKE_SOURCE_DIR}/third_party/SDL3-3.4.10/cmake")
     find_package(SDL3 QUIET)
     find_path(CARROT_GLAD_INCLUDE_DIR glad/gl.h PATHS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/glad-4.6/include)
     if(SDL3_FOUND AND CARROT_GLAD_INCLUDE_DIR)
