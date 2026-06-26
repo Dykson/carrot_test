@@ -43,6 +43,148 @@ uint8_t pixel_at_clamped(const ImageRgb& image, int x, int y, int channel) {
     return image.pixels[(clamped_y * image.width + clamped_x) * 3 + channel];
 }
 
+void forward_dct_block(const double input[kBlockSize][kBlockSize], double output[kBlockSize][kBlockSize]);
+void inverse_dct_block(const double input[kBlockSize][kBlockSize], double output[kBlockSize][kBlockSize]);
+
+struct YCbCr {
+    double y = 0.0;
+    double cb = 0.0;
+    double cr = 0.0;
+};
+
+int half_ceil(int value) {
+    return (value + 1) / 2;
+}
+
+YCbCr rgb_to_ycbcr(double red, double green, double blue) {
+    return {
+        0.299 * red + 0.587 * green + 0.114 * blue,
+        128.0 - 0.168736 * red - 0.331264 * green + 0.5 * blue,
+        128.0 + 0.5 * red - 0.418688 * green - 0.081312 * blue,
+    };
+}
+
+uint8_t clamp_to_u8(double value) {
+    const long rounded = std::lround(value);
+    return static_cast<uint8_t>(std::clamp(rounded, 0L, 255L));
+}
+
+void ycbcr_to_rgb(double y, double cb, double cr, uint8_t& red, uint8_t& green, uint8_t& blue) {
+    const double cb_delta = cb - 128.0;
+    const double cr_delta = cr - 128.0;
+    red = clamp_to_u8(y + 1.402 * cr_delta);
+    green = clamp_to_u8(y - 0.344136 * cb_delta - 0.714136 * cr_delta);
+    blue = clamp_to_u8(y + 1.772 * cb_delta);
+}
+
+std::vector<double> make_luma_component(const ImageRgb& image) {
+    std::vector<double> luma(static_cast<size_t>(image.width * image.height));
+
+    for (int y = 0; y < image.height; ++y) {
+        for (int x = 0; x < image.width; ++x) {
+            const double red = pixel_at_clamped(image, x, y, 0);
+            const double green = pixel_at_clamped(image, x, y, 1);
+            const double blue = pixel_at_clamped(image, x, y, 2);
+            luma[static_cast<size_t>(y * image.width + x)] = rgb_to_ycbcr(red, green, blue).y;
+        }
+    }
+
+    return luma;
+}
+
+std::vector<double> make_subsampled_chroma_component(const ImageRgb& image, bool cr_component) {
+    const int chroma_width = half_ceil(image.width);
+    const int chroma_height = half_ceil(image.height);
+    std::vector<double> chroma(static_cast<size_t>(chroma_width * chroma_height));
+
+    for (int y = 0; y < chroma_height; ++y) {
+        for (int x = 0; x < chroma_width; ++x) {
+            double sum = 0.0;
+            for (int offset_y = 0; offset_y < 2; ++offset_y) {
+                for (int offset_x = 0; offset_x < 2; ++offset_x) {
+                    const int source_x = std::min(image.width - 1, x * 2 + offset_x);
+                    const int source_y = std::min(image.height - 1, y * 2 + offset_y);
+                    const double red = pixel_at_clamped(image, source_x, source_y, 0);
+                    const double green = pixel_at_clamped(image, source_x, source_y, 1);
+                    const double blue = pixel_at_clamped(image, source_x, source_y, 2);
+                    const YCbCr ycbcr = rgb_to_ycbcr(red, green, blue);
+                    sum += cr_component ? ycbcr.cr : ycbcr.cb;
+                }
+            }
+
+            chroma[static_cast<size_t>(y * chroma_width + x)] = sum / 4.0;
+        }
+    }
+
+    return chroma;
+}
+
+double component_at_clamped(const std::vector<double>& component, int width, int height, int x, int y) {
+    const int clamped_x = std::clamp(x, 0, width - 1);
+    const int clamped_y = std::clamp(y, 0, height - 1);
+    return component[static_cast<size_t>(clamped_y * width + clamped_x)];
+}
+
+void encode_component(std::vector<uint8_t>& bitstream,
+                      const std::vector<double>& component,
+                      int width,
+                      int height,
+                      int q) {
+    double samples[kBlockSize][kBlockSize]{};
+    double coefficients[kBlockSize][kBlockSize]{};
+
+    for (int block_y = 0; block_y < height; block_y += kBlockSize) {
+        for (int block_x = 0; block_x < width; block_x += kBlockSize) {
+            for (int y = 0; y < kBlockSize; ++y) {
+                for (int x = 0; x < kBlockSize; ++x) {
+                    samples[y][x] = component_at_clamped(component, width, height, block_x + x, block_y + y) - 128.0;
+                }
+            }
+
+            forward_dct_block(samples, coefficients);
+
+            for (int v = 0; v < kBlockSize; ++v) {
+                for (int u = 0; u < kBlockSize; ++u) {
+                    write_i16(bitstream, static_cast<int>(std::lround(coefficients[v][u] / q)));
+                }
+            }
+        }
+    }
+}
+
+std::vector<double> decode_component(const MjpegFrame& frame, size_t& offset, int width, int height, int q) {
+    std::vector<double> component(static_cast<size_t>(width * height));
+    double coefficients[kBlockSize][kBlockSize]{};
+    double samples[kBlockSize][kBlockSize]{};
+
+    for (int block_y = 0; block_y < height; block_y += kBlockSize) {
+        for (int block_x = 0; block_x < width; block_x += kBlockSize) {
+            for (int v = 0; v < kBlockSize; ++v) {
+                for (int u = 0; u < kBlockSize; ++u) {
+                    coefficients[v][u] = read_i16(frame.bitstream, offset) * q;
+                }
+            }
+
+            inverse_dct_block(coefficients, samples);
+
+            for (int y = 0; y < kBlockSize; ++y) {
+                for (int x = 0; x < kBlockSize; ++x) {
+                    const int component_x = block_x + x;
+                    const int component_y = block_y + y;
+                    if (component_x >= width || component_y >= height) {
+                        continue;
+                    }
+
+                    component[static_cast<size_t>(component_y * width + component_x)] =
+                        std::clamp(samples[y][x] + 128.0, 0.0, 255.0);
+                }
+            }
+        }
+    }
+
+    return component;
+}
+
 void forward_dct_1d_llm(const double input[kBlockSize], double output[kBlockSize]) {
     // Loeffler-Ligtenberg-Moschytz 8-point DCT, adapted from:
     // https://github.com/norishigefukushima/dct_simd/blob/master/dct/dct8x8_simd.cpp
@@ -188,72 +330,52 @@ MjpegFrame MjpegEncoder::encode(const ImageRgb& image) const {
     }
 
     const int q = quantization_scale(quality_);
+    const int chroma_width = half_ceil(image.width);
+    const int chroma_height = half_ceil(image.height);
+    const std::vector<double> luma = make_luma_component(image);
+    const std::vector<double> chroma_blue = make_subsampled_chroma_component(image, false);
+    const std::vector<double> chroma_red = make_subsampled_chroma_component(image, true);
+
     MjpegFrame frame{image.width, image.height, {}};
-    frame.bitstream.insert(frame.bitstream.end(), {'S', 'J', 'P', 'G', static_cast<uint8_t>(q)});
+    frame.bitstream.insert(frame.bitstream.end(), {'S', 'J', 'P', '2', static_cast<uint8_t>(q)});
 
-    double samples[kBlockSize][kBlockSize]{};
-    double coefficients[kBlockSize][kBlockSize]{};
-
-    for (int block_y = 0; block_y < image.height; block_y += kBlockSize) {
-        for (int block_x = 0; block_x < image.width; block_x += kBlockSize) {
-            for (int channel = 0; channel < 3; ++channel) {
-                for (int y = 0; y < kBlockSize; ++y) {
-                    for (int x = 0; x < kBlockSize; ++x) {
-                        samples[y][x] = pixel_at_clamped(image, block_x + x, block_y + y, channel) - 128.0;
-                    }
-                }
-
-                forward_dct_block(samples, coefficients);
-
-                for (int v = 0; v < kBlockSize; ++v) {
-                    for (int u = 0; u < kBlockSize; ++u) {
-                        write_i16(frame.bitstream, static_cast<int>(std::lround(coefficients[v][u] / q)));
-                    }
-                }
-            }
-        }
-    }
+    encode_component(frame.bitstream, luma, image.width, image.height, q);
+    encode_component(frame.bitstream, chroma_blue, chroma_width, chroma_height, q);
+    encode_component(frame.bitstream, chroma_red, chroma_width, chroma_height, q);
 
     return frame;
 }
 
 ImageRgb MjpegDecoder::decode(const MjpegFrame& frame) const {
-    if (frame.bitstream.size() < 5 || std::string(reinterpret_cast<const char*>(frame.bitstream.data()), 4) != "SJPG") {
+    if (frame.bitstream.size() < 5 || std::string(reinterpret_cast<const char*>(frame.bitstream.data()), 4) != "SJP2") {
         throw std::runtime_error("bad simplified MJPEG stream");
     }
 
     const int q = frame.bitstream[4];
+    const int chroma_width = half_ceil(frame.width);
+    const int chroma_height = half_ceil(frame.height);
     size_t offset = 5;
+
+    const std::vector<double> luma = decode_component(frame, offset, frame.width, frame.height, q);
+    const std::vector<double> chroma_blue = decode_component(frame, offset, chroma_width, chroma_height, q);
+    const std::vector<double> chroma_red = decode_component(frame, offset, chroma_width, chroma_height, q);
+
     ImageRgb image{frame.width, frame.height, std::vector<uint8_t>(static_cast<size_t>(frame.width * frame.height * 3))};
+    for (int y = 0; y < frame.height; ++y) {
+        for (int x = 0; x < frame.width; ++x) {
+            const double yy = luma[static_cast<size_t>(y * frame.width + x)];
+            const double cb = component_at_clamped(chroma_blue, chroma_width, chroma_height, x / 2, y / 2);
+            const double cr = component_at_clamped(chroma_red, chroma_width, chroma_height, x / 2, y / 2);
 
-    double coefficients[kBlockSize][kBlockSize]{};
-    double samples[kBlockSize][kBlockSize]{};
+            uint8_t red = 0;
+            uint8_t green = 0;
+            uint8_t blue = 0;
+            ycbcr_to_rgb(yy, cb, cr, red, green, blue);
 
-    for (int block_y = 0; block_y < frame.height; block_y += kBlockSize) {
-        for (int block_x = 0; block_x < frame.width; block_x += kBlockSize) {
-            for (int channel = 0; channel < 3; ++channel) {
-                for (int v = 0; v < kBlockSize; ++v) {
-                    for (int u = 0; u < kBlockSize; ++u) {
-                        coefficients[v][u] = read_i16(frame.bitstream, offset) * q;
-                    }
-                }
-
-                inverse_dct_block(coefficients, samples);
-
-                for (int y = 0; y < kBlockSize; ++y) {
-                    for (int x = 0; x < kBlockSize; ++x) {
-                        const int image_x = block_x + x;
-                        const int image_y = block_y + y;
-                        if (image_x >= frame.width || image_y >= frame.height) {
-                            continue;
-                        }
-
-                        const long rounded = std::lround(samples[y][x] + 128.0);
-                        image.pixels[(image_y * frame.width + image_x) * 3 + channel] =
-                            static_cast<uint8_t>(std::clamp(rounded, 0L, 255L));
-                    }
-                }
-            }
+            const size_t pixel_offset = static_cast<size_t>((y * frame.width + x) * 3);
+            image.pixels[pixel_offset] = red;
+            image.pixels[pixel_offset + 1] = green;
+            image.pixels[pixel_offset + 2] = blue;
         }
     }
 
