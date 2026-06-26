@@ -101,8 +101,15 @@ std::vector<double> make_luma_component(const ImageRgb& image) {
 }
 
 std::vector<double> make_subsampled_chroma_component(const ImageRgb& image, bool cr_component) {
+    // The active path is YUV420p / 4:2:0: chroma is half-resolution in both axes.
+    // Each Cb/Cr sample is the average of a 2x2 RGB pixel area converted to YCbCr.
     const int chroma_width = half_ceil(image.width);
     const int chroma_height = half_ceil(image.height);
+
+    // YUV422p / 4:2:2 would keep full vertical chroma resolution and subsample only horizontally:
+    // const int chroma_width = half_ceil(image.width);
+    // const int chroma_height = image.height;
+    // The loop would then average a 2x1 area by using offset_y < 1 and dividing the sum by 2.0.
     std::vector<double> chroma(static_cast<size_t>(chroma_width * chroma_height));
 
     for (int y = 0; y < chroma_height; ++y) {
