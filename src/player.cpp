@@ -15,11 +15,11 @@
 #include <cstdint>
 #include <exception>
 #include <filesystem>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace {
@@ -78,6 +78,25 @@ struct Renderer
     GLuint program = 0;
     GLuint vertex_array = 0;
     GLuint vertex_buffer = 0;
+};
+
+struct PlaybackState
+{
+    const std::vector<carrot::ImageRgb> &frames;
+    const AudioState &audio_state;
+    SDL_AudioStream *audio_stream = nullptr;
+    double fps = 25.0;
+    size_t current_frame = 0;
+    double audio_pts = 0.0;
+    double video_pts = 0.0;
+    double av_delta_ms = 0.0;
+};
+
+struct DiagnosticsState
+{
+    using Clock = std::chrono::steady_clock;
+    Clock::time_point last_report = Clock::now();
+    uint64_t rendered_frames = 0;
 };
 
 GLuint compile_shader(GLenum type, const char *source)
@@ -224,6 +243,78 @@ void draw_textured_fullscreen_quad(const Renderer &renderer)
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 }
 
+void upload_frame(const carrot::ImageRgb &frame)
+{
+    glTexSubImage2D(GL_TEXTURE_2D,
+                    0,
+                    0,
+                    0,
+                    frame.width,
+                    frame.height,
+                    GL_RGB,
+                    GL_UNSIGNED_BYTE,
+                    frame.pixels.data());
+}
+
+void process_events(bool &running)
+{
+    SDL_Event event{};
+    while (SDL_PollEvent(&event) != 0) {
+        if (event.type == SDL_EVENT_QUIT
+            || (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE)) {
+            running = false;
+        }
+    }
+}
+
+void print_diagnostics_if_due(const PlaybackState &playback, DiagnosticsState &diagnostics)
+{
+    ++diagnostics.rendered_frames;
+
+    const DiagnosticsState::Clock::time_point now = DiagnosticsState::Clock::now();
+    const std::chrono::duration<double> elapsed = now - diagnostics.last_report;
+    if (elapsed.count() < 1.0) {
+        return;
+    }
+
+    const double measured_fps = static_cast<double>(diagnostics.rendered_frames) / elapsed.count();
+    std::cout << std::fixed << std::setprecision(2)
+              << "FPS: " << measured_fps << '\n'
+              << "Frame: " << playback.current_frame << '\n'
+              << std::setprecision(3)
+              << "Audio PTS: " << playback.audio_pts << '\n'
+              << "Video PTS: " << playback.video_pts << '\n'
+              << std::setprecision(1)
+              << "AV Delta: " << (playback.av_delta_ms >= 0.0 ? "+" : "")
+              << playback.av_delta_ms << " ms\n";
+
+    diagnostics.last_report = now;
+    diagnostics.rendered_frames = 0;
+}
+
+void update(PlaybackState &playback)
+{
+    playback.audio_pts = audio_clock_seconds(playback.audio_state, playback.audio_stream);
+
+    const size_t next_frame =
+        static_cast<size_t>(playback.audio_pts * playback.fps) % playback.frames.size();
+    if (next_frame != playback.current_frame) {
+        playback.current_frame = next_frame;
+        upload_frame(playback.frames[playback.current_frame]);
+    }
+
+    playback.video_pts = static_cast<double>(playback.current_frame) / playback.fps;
+    playback.av_delta_ms = (playback.video_pts - playback.audio_pts) * 1000.0;
+}
+
+void render(const Renderer &renderer,
+            const PlaybackState &playback,
+            DiagnosticsState &diagnostics)
+{
+    draw_textured_fullscreen_quad(renderer);
+    print_diagnostics_if_due(playback, diagnostics);
+}
+
 void destroy_renderer(const Renderer &renderer)
 {
     glDeleteBuffers(1, &renderer.vertex_buffer);
@@ -266,6 +357,9 @@ int carrot::run_player(int argc, char **argv)
         const std::string audio_path = argv[1];
         const std::string frames_folder = argv[2];
         const double fps = argc >= 4 ? std::stod(argv[3]) : 25.0;
+        if (fps <= 0.0) {
+            throw std::runtime_error("fps must be positive");
+        }
 
         carrot::WavPcm wav = carrot::read_wav_pcm16(audio_path);
         const carrot::ImaAdpcmEncoder audio_encoder;
@@ -343,37 +437,14 @@ int carrot::run_player(int argc, char **argv)
         SDL_ResumeAudioStreamDevice(audio_stream);
 
         bool running = true;
+        PlaybackState playback{frames, audio_state, audio_stream, fps};
+        DiagnosticsState diagnostics;
 
         while (running) {
-            SDL_Event event{};
-            while (SDL_PollEvent(&event) != 0) {
-                if (event.type == SDL_EVENT_QUIT
-                    || (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE)) {
-                    running = false;
-                }
-            }
-
-            const double seconds = audio_clock_seconds(audio_state, audio_stream);
-
-            const size_t frame_index = static_cast<size_t>(seconds * fps) % frames.size();
-
-            const carrot::ImageRgb &frame = frames[frame_index];
-
-            glBindTexture(GL_TEXTURE_2D, renderer.texture);
-            glTexSubImage2D(GL_TEXTURE_2D,
-                            0,
-                            0,
-                            0,
-                            frame.width,
-                            frame.height,
-                            GL_RGB,
-                            GL_UNSIGNED_BYTE,
-                            frame.pixels.data());
-
-            draw_textured_fullscreen_quad(renderer);
+            process_events(running);
+            update(playback);
+            render(renderer, playback, diagnostics);
             SDL_GL_SwapWindow(window);
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
         SDL_DestroyAudioStream(audio_stream);
