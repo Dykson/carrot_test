@@ -1,72 +1,107 @@
 # Carrot Broadcast media codec test
 
-C++17 implementation of the requested media-coding test assignment:
+C++17 educational media-codec project for a live-broadcasting-oriented test assignment. It keeps the codec logic in the repository: audio is encoded with a hand-written IMA ADPCM implementation and video uses a small MJPEG-like intra-frame codec. The project does **not** call FFmpeg/libavcodec, libjpeg/libjpeg-turbo, or a library ADPCM codec.
 
-1. IMA ADPCM audio encode/decode.
-2. Educational MJPEG-style video encode/decode.
-3. SDL3 + OpenGL playback of decoded audio/video streams.
+## What is implemented
 
-The code intentionally keeps the codec algorithms visible and readable instead of hiding them behind FFmpeg or platform codecs.
+* PCM16 WAV read/write for command-line round trips.
+* IMA ADPCM encode/decode with independent per-channel blocks.
+* A teaching MJPEG-like RGB video path:
+  * RGB -> YCbCr conversion;
+  * 4:2:0 chroma subsampling;
+  * 8x8 DCT/IDCT;
+  * separate luma/chroma scalar quantization values;
+  * zig-zag coefficient ordering before RLE;
+  * compact project-local `SJR3` frame payloads inside a `CMJ2` stream writer.
+* PNG input/output through `stb_image.h` and `stb_image_write.h` only for image I/O.
+* Optional SDL3/OpenGL player when dependencies are available.
+* `carrot_selftest` smoke tests for codec edge cases.
 
 ## Build
 
 ```bash
 cmake -S . -B build
-cmake --build build
+cmake --build build --config Release
+```
+
+CMake options:
+
+```bash
+cmake -S . -B build -DCARROT_BUILD_PLAYER=OFF
+cmake -S . -B build -DCARROT_BUILD_SELFTEST=ON
 ```
 
 Targets:
 
 * `codec_tool` is always built.
-* `codec_tool player ...` is enabled when CMake can find SDL3 and OpenGL development packages; otherwise the mode prints an explanatory error.
+* `carrot_selftest` is built when `CARROT_BUILD_SELFTEST=ON` (default).
+* `codec_tool player ...` is compiled only when `CARROT_BUILD_PLAYER=ON` and CMake finds SDL3 plus a `glad/gl.h` include path. There are no hard-coded absolute SDL paths.
 
 ## Usage
 
+Audio ADPCM round trip:
+
 ```bash
 ./build/codec_tool adpcm input.wav decoded.wav
+```
+
+Video MJPEG-like round trip over a folder of PNG frames:
+
+```bash
 ./build/codec_tool mjpeg frames_png decoded_frames
+```
+
+The PNG frame list is collected first and sorted lexicographically before encoding, so names such as `frame_0001.png`, `frame_0002.png`, and `frame_0010.png` play in the expected order.
+
+Player mode, if SDL3/OpenGL/glad were available at build time:
+
+```bash
 ./build/codec_tool player input.wav frames_png 25
 ```
 
-Intermediate encoded assets are saved under `media/` when running the command-line roundtrips or player smoke path:
+Self tests:
 
-* `media/audio.adpcm` stores the IMA ADPCM channel blocks.
-* `media/video.mjpeg` stores the encoded MJPEG frame stream.
+```bash
+./build/carrot_selftest
+```
 
-`codec_tool player` decodes the WAV through the IMA ADPCM roundtrip, decodes PNG frames through the simplified MJPEG roundtrip, plays PCM through SDL3, uploads frames into an OpenGL texture, and chooses the displayed frame from the audio/video clock time.
+The command-line round trips and player path write demonstration intermediate streams under `media/`:
 
-## IMA ADPCM assumptions
+* `media/audio.adpcm` for the ADPCM channel blocks;
+* `media/video.mjpeg` for the project-local MJPEG-like frame stream.
+
+## IMA ADPCM notes
 
 * Input WAV must be little-endian PCM16.
 * Channels are encoded independently.
-* The first sample of each channel is stored as the predictor.
-* Subsequent samples are encoded as 4-bit IMA ADPCM nibbles with the standard step and index adaptation tables.
-* The decoder reconstructs interleaved PCM16 from the encoded channel blocks.
+* Each channel block stores the initial predictor and the exact PCM sample count for that channel.
+* The decoder uses the stored sample count to decode only valid nibbles, so odd nibble counts do not produce an extra padding sample.
+* Empty, 1-sample, 2-sample, 3-sample, odd-length mono, and stereo layouts are covered by `carrot_selftest` size checks.
 
-## Simplified MJPEG assumptions
+## MJPEG-like format notes
 
-This is deliberately not a complete JPEG/JFIF writer. It demonstrates the algorithmic core that is relevant for the test assignment:
+This is an educational intra-frame stream, not a full JPEG/JFIF/MJPEG file format. The current frame payload magic is `SJR3`; older `SJR2` payloads are rejected instead of being decoded with the wrong coefficient order.
 
-* RGB input is converted to YCbCr.
-* Luma is kept at full resolution while Cb/Cr are stored with 4:2:0 chroma subsampling.
-* Every component is processed in 8x8 blocks and level-shifted by 128.
-* Forward DCT is applied to every block/component.
-* Coefficients are quantized with one quality-dependent scalar.
-* Quantized coefficients are run-length encoded and written into a compact educational `SJR2` stream.
-* The decoder performs inverse quantization, IDCT, chroma upsampling, and YCbCr-to-RGB conversion.
+Validation performed by the decoder includes:
 
-Deliberate simplifications:
+* valid magic/header;
+* non-zero luma/chroma quantization scales;
+* positive frame and component dimensions;
+* bounds checks while reading the RLE bitstream;
+* rejection of unexpected trailing bytes after all expected component blocks are decoded.
 
-* no JPEG marker syntax, JFIF/EXIF metadata, restart intervals, or progressive scans;
-* no Huffman table generation and no entropy-coded scan segments;
-* no zig-zag ordering or Huffman entropy coding;
-* fixed 4:2:0 chroma subsampling rather than arbitrary JPEG sampling factors;
-* no separate luminance/chrominance quantization matrices.
+Deliberate simplifications that remain:
+
+* no Huffman coding;
+* no JPEG marker syntax, JFIF/EXIF metadata, or restart intervals;
+* no progressive JPEG scans;
+* fixed 4:2:0 chroma sampling;
+* scalar luma/chroma quantization values instead of full JPEG quantization matrices.
 
 ## PNG / stb
 
-The image IO layer uses the requested `stb_image.h` and `stb_image_write.h` function names. In this container the upstream headers could not be downloaded from `https://github.com/planetack/stb_image`, so `third_party/stb` contains a tiny API-compatible facade that is enough for build-only checks. Replace those two files with the real upstream stb headers to enable actual PNG reading and writing without changing codec code.
+The repository contains real `stb_image.h` and `stb_image_write.h` headers under `third_party/stb`. They are used only to read and write PNG files; the MJPEG-like codec itself is implemented manually in `src/mjpeg.cpp`.
 
 ## Player notes
 
-`codec_tool player` is implemented with SDL3 for window/audio/timing and OpenGL for presenting decoded video frames. It requests an OpenGL 4.6 compatibility context so the test player can stay compact while still exercising the expected SDL3/OpenGL integration path. When a `glad::glad` CMake target is available, the player mode initializes glad after creating the SDL OpenGL context. A production player would replace the compact compatibility-profile quad with a shader/VBO/VAO renderer.
+The player decodes audio through the IMA ADPCM path and frames through the MJPEG-like path, then uses SDL3 for events/audio and OpenGL for texture presentation. Video frame selection is driven by the audio clock and loops back to the first frame. The audio callback continuously wraps the PCM buffer without inserting silence between loops. A waveform discontinuity at the loop point can still click if the WAV itself is not loop-friendly.

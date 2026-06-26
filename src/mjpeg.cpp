@@ -6,9 +6,11 @@
 #include "stb_image_write.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -18,14 +20,49 @@ namespace {
 constexpr double kInvSqrt2 = 0.70710678118654752440;
 constexpr int kBlockSize = 8;
 
+constexpr std::array<int, 64> kZigZag = {
+    0, 1, 8, 16, 9, 2, 3, 10,
+    17, 24, 32, 25, 18, 11, 4, 5,
+    12, 19, 26, 33, 40, 48, 41, 34,
+    27, 20, 13, 6, 7, 14, 21, 28,
+    35, 42, 49, 56, 57, 50, 43, 36,
+    29, 22, 15, 23, 30, 37, 44, 51,
+    58, 59, 52, 45, 38, 31, 39, 46,
+    53, 60, 61, 54, 47, 55, 62, 63,
+};
 
-int quantization_scale(int quality) {
-    return std::max(1, 101 - std::clamp(quality, 1, 100));
+struct QuantizationConfig { int luma; int chroma; };
+
+size_t checked_mul(size_t a, size_t b, const char* what) {
+    if (a != 0 && b > std::numeric_limits<size_t>::max() / a) {
+        throw std::runtime_error(std::string(what) + " size overflow");
+    }
+    return a * b;
+}
+
+size_t rgb_byte_count(int width, int height) {
+    if (width <= 0 || height <= 0) {
+        throw std::runtime_error("image dimensions must be positive");
+    }
+    return checked_mul(checked_mul(static_cast<size_t>(width), static_cast<size_t>(height), "image"), 3, "RGB image");
+}
+
+
+QuantizationConfig quantization_config(int quality) {
+    const int base = std::max(1, 101 - std::clamp(quality, 1, 100));
+    return {base, std::max(1, base + base / 2)};
 }
 
 void write_i16(std::vector<uint8_t>& output, int value) {
     output.push_back(static_cast<uint8_t>(value & 0xFF));
     output.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
+}
+
+uint32_t checked_u32(size_t value, const char* what) {
+    if (value > std::numeric_limits<uint32_t>::max()) {
+        throw std::runtime_error(std::string(what) + " does not fit into 32-bit stream field");
+    }
+    return static_cast<uint32_t>(value);
 }
 
 void write_u32(std::ostream& stream, uint32_t value) {
@@ -86,7 +123,7 @@ void ycbcr_to_rgb(double y, double cb, double cr, uint8_t& red, uint8_t& green, 
 }
 
 std::vector<double> make_luma_component(const ImageRgb& image) {
-    std::vector<double> luma(static_cast<size_t>(image.width * image.height));
+    std::vector<double> luma(checked_mul(static_cast<size_t>(image.width), static_cast<size_t>(image.height), "luma"));
 
     for (int y = 0; y < image.height; ++y) {
         for (int x = 0; x < image.width; ++x) {
@@ -110,7 +147,7 @@ std::vector<double> make_subsampled_chroma_component(const ImageRgb& image, bool
     // const int chroma_width = half_ceil(image.width);
     // const int chroma_height = image.height;
     // The loop would then average a 2x1 area by using offset_y < 1 and dividing the sum by 2.0.
-    std::vector<double> chroma(static_cast<size_t>(chroma_width * chroma_height));
+    std::vector<double> chroma(checked_mul(static_cast<size_t>(chroma_width), static_cast<size_t>(chroma_height), "chroma"));
 
     for (int y = 0; y < chroma_height; ++y) {
         for (int x = 0; x < chroma_width; ++x) {
@@ -145,7 +182,10 @@ void write_rle_block(std::vector<uint8_t>& bitstream, const double coefficients[
 
     for (int v = 0; v < kBlockSize; ++v) {
         for (int u = 0; u < kBlockSize; ++u) {
-            const int quantized = static_cast<int>(std::lround(coefficients[v][u] / q));
+            const int zigzag_index = kZigZag[static_cast<size_t>(v * kBlockSize + u)];
+            const int source_y = zigzag_index / kBlockSize;
+            const int source_x = zigzag_index % kBlockSize;
+            const int quantized = static_cast<int>(std::lround(coefficients[source_y][source_x] / q));
             if (quantized == 0) {
                 ++zero_run;
                 continue;
@@ -185,7 +225,8 @@ void read_rle_block(const std::vector<uint8_t>& bitstream,
         }
 
         const int16_t value = read_i16(bitstream, offset);
-        coefficients[coefficient_index / kBlockSize][coefficient_index % kBlockSize] = value * q;
+        const int zigzag_index = kZigZag[static_cast<size_t>(coefficient_index)];
+        coefficients[zigzag_index / kBlockSize][zigzag_index % kBlockSize] = value * q;
         ++coefficient_index;
     }
 }
@@ -214,7 +255,7 @@ void encode_component(std::vector<uint8_t>& bitstream,
 }
 
 std::vector<double> decode_component(const MjpegFrame& frame, size_t& offset, int width, int height, int q) {
-    std::vector<double> component(static_cast<size_t>(width * height));
+    std::vector<double> component(checked_mul(static_cast<size_t>(width), static_cast<size_t>(height), "component"));
     double coefficients[kBlockSize][kBlockSize]{};
     double samples[kBlockSize][kBlockSize]{};
 
@@ -382,11 +423,12 @@ MjpegEncoder::MjpegEncoder(int quality)
     : quality_(quality) {}
 
 MjpegFrame MjpegEncoder::encode(const ImageRgb& image) const {
-    if (image.width <= 0 || image.height <= 0 || image.pixels.size() != static_cast<size_t>(image.width * image.height * 3)) {
+    const size_t expected_bytes = rgb_byte_count(image.width, image.height);
+    if (image.pixels.size() != expected_bytes) {
         throw std::runtime_error("invalid RGB image");
     }
 
-    const int q = quantization_scale(quality_);
+    const QuantizationConfig quantization = quantization_config(quality_);
     const int chroma_width = half_ceil(image.width);
     const int chroma_height = half_ceil(image.height);
     const std::vector<double> luma = make_luma_component(image);
@@ -394,30 +436,41 @@ MjpegFrame MjpegEncoder::encode(const ImageRgb& image) const {
     const std::vector<double> chroma_red = make_subsampled_chroma_component(image, true);
 
     MjpegFrame frame{image.width, image.height, {}};
-    frame.bitstream.insert(frame.bitstream.end(), {'S', 'J', 'R', '2', static_cast<uint8_t>(q)});
+    frame.bitstream.insert(frame.bitstream.end(), {'S', 'J', 'R', '3', static_cast<uint8_t>(quantization.luma), static_cast<uint8_t>(quantization.chroma)});
 
-    encode_component(frame.bitstream, luma, image.width, image.height, q);
-    encode_component(frame.bitstream, chroma_blue, chroma_width, chroma_height, q);
-    encode_component(frame.bitstream, chroma_red, chroma_width, chroma_height, q);
+    encode_component(frame.bitstream, luma, image.width, image.height, quantization.luma);
+    encode_component(frame.bitstream, chroma_blue, chroma_width, chroma_height, quantization.chroma);
+    encode_component(frame.bitstream, chroma_red, chroma_width, chroma_height, quantization.chroma);
 
     return frame;
 }
 
 ImageRgb MjpegDecoder::decode(const MjpegFrame& frame) const {
-    if (frame.bitstream.size() < 5 || std::string(reinterpret_cast<const char*>(frame.bitstream.data()), 4) != "SJR2") {
-        throw std::runtime_error("bad simplified MJPEG stream");
+    if (frame.width <= 0 || frame.height <= 0) {
+        throw std::runtime_error("bad simplified MJPEG frame dimensions");
+    }
+    (void)rgb_byte_count(frame.width, frame.height);
+    if (frame.bitstream.size() < 6 || std::string(reinterpret_cast<const char*>(frame.bitstream.data()), 4) != "SJR3") {
+        throw std::runtime_error("bad simplified MJPEG stream magic/header");
     }
 
-    const int q = frame.bitstream[4];
+    const int q_luma = frame.bitstream[4];
+    const int q_chroma = frame.bitstream[5];
+    if (q_luma == 0 || q_chroma == 0) {
+        throw std::runtime_error("bad simplified MJPEG quantization scale");
+    }
     const int chroma_width = half_ceil(frame.width);
     const int chroma_height = half_ceil(frame.height);
-    size_t offset = 5;
+    size_t offset = 6;
 
-    const std::vector<double> luma = decode_component(frame, offset, frame.width, frame.height, q);
-    const std::vector<double> chroma_blue = decode_component(frame, offset, chroma_width, chroma_height, q);
-    const std::vector<double> chroma_red = decode_component(frame, offset, chroma_width, chroma_height, q);
+    const std::vector<double> luma = decode_component(frame, offset, frame.width, frame.height, q_luma);
+    const std::vector<double> chroma_blue = decode_component(frame, offset, chroma_width, chroma_height, q_chroma);
+    const std::vector<double> chroma_red = decode_component(frame, offset, chroma_width, chroma_height, q_chroma);
+    if (offset != frame.bitstream.size()) {
+        throw std::runtime_error("unexpected trailing bytes in simplified MJPEG stream");
+    }
 
-    ImageRgb image{frame.width, frame.height, std::vector<uint8_t>(static_cast<size_t>(frame.width * frame.height * 3))};
+    ImageRgb image{frame.width, frame.height, std::vector<uint8_t>(rgb_byte_count(frame.width, frame.height))};
     for (int y = 0; y < frame.height; ++y) {
         for (int x = 0; x < frame.width; ++x) {
             const double yy = luma[static_cast<size_t>(y * frame.width + x)];
@@ -429,7 +482,7 @@ ImageRgb MjpegDecoder::decode(const MjpegFrame& frame) const {
             uint8_t blue = 0;
             ycbcr_to_rgb(yy, cb, cr, red, green, blue);
 
-            const size_t pixel_offset = static_cast<size_t>((y * frame.width + x) * 3);
+            const size_t pixel_offset = (static_cast<size_t>(y) * static_cast<size_t>(frame.width) + static_cast<size_t>(x)) * 3;
             image.pixels[pixel_offset] = red;
             image.pixels[pixel_offset + 1] = green;
             image.pixels[pixel_offset + 2] = blue;
@@ -449,12 +502,17 @@ ImageRgb load_png_rgb(const std::string& path) {
         throw std::runtime_error(stbi_failure_reason());
     }
 
-    ImageRgb image{width, height, std::vector<uint8_t>(pixels, pixels + static_cast<size_t>(width * height * 3))};
+    const size_t byte_count = rgb_byte_count(width, height);
+    ImageRgb image{width, height, std::vector<uint8_t>(pixels, pixels + byte_count)};
     stbi_image_free(pixels);
     return image;
 }
 
 void save_png_rgb(const std::string& path, const ImageRgb& image) {
+    (void)rgb_byte_count(image.width, image.height);
+    if (image.pixels.size() != rgb_byte_count(image.width, image.height)) {
+        throw std::runtime_error("invalid RGB image");
+    }
     const int stride_bytes = image.width * 3;
     if (!stbi_write_png(path.c_str(), image.width, image.height, 3, image.pixels.data(), stride_bytes)) {
         throw std::runtime_error("failed to write image: " + path);
@@ -465,10 +523,16 @@ std::vector<MjpegFrame> encode_folder(const std::string& folder, int quality) {
     std::vector<MjpegFrame> frames;
     MjpegEncoder encoder(quality);
 
+    std::vector<std::filesystem::path> png_paths;
     for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator(folder)) {
         if (entry.path().extension() == ".png") {
-            frames.push_back(encoder.encode(load_png_rgb(entry.path().string())));
+            png_paths.push_back(entry.path());
         }
+    }
+    std::sort(png_paths.begin(), png_paths.end());
+    frames.reserve(png_paths.size());
+    for (const std::filesystem::path& png_path : png_paths) {
+        frames.push_back(encoder.encode(load_png_rgb(png_path.string())));
     }
 
     return frames;
@@ -492,12 +556,15 @@ void write_mjpeg_stream(const std::string& path, const std::vector<MjpegFrame>& 
     }
 
     file.write("CMJ2", 4);
-    write_u32(file, static_cast<uint32_t>(frames.size()));
+    write_u32(file, checked_u32(frames.size(), "frame count"));
 
     for (const MjpegFrame& frame : frames) {
+        if (frame.width <= 0 || frame.height <= 0) {
+            throw std::runtime_error("cannot write MJPEG frame with invalid dimensions");
+        }
         write_u32(file, static_cast<uint32_t>(frame.width));
         write_u32(file, static_cast<uint32_t>(frame.height));
-        write_u32(file, static_cast<uint32_t>(frame.bitstream.size()));
+        write_u32(file, checked_u32(frame.bitstream.size(), "frame bitstream size"));
         file.write(reinterpret_cast<const char*>(frame.bitstream.data()),
                    static_cast<std::streamsize>(frame.bitstream.size()));
     }

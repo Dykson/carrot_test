@@ -4,6 +4,7 @@
 #include <array>
 #include <fstream>
 #include <stdexcept>
+#include <limits>
 #include <string>
 
 namespace carrot {
@@ -110,6 +111,10 @@ std::vector<ImaAdpcmBlock> ImaAdpcmEncoder::encode(
         ImaAdpcmBlock& block = encoded_channels[channel];
         block.predictor = frame_count == 0 ? 0 : interleaved_pcm[channel];
         block.step_index = 0;
+        if (frame_count > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+            throw std::runtime_error("ADPCM block has too many samples");
+        }
+        block.sample_count = static_cast<uint32_t>(frame_count);
 
         int predictor = block.predictor;
         int step_index = block.step_index;
@@ -144,28 +149,42 @@ std::vector<int16_t> ImaAdpcmDecoder::decode(
         throw std::runtime_error("invalid ADPCM layout");
     }
 
-    size_t max_nibble_count = 0;
+    uint32_t expected_samples = blocks.empty() ? 0 : blocks.front().sample_count;
     for (const ImaAdpcmBlock& block : blocks) {
-        max_nibble_count = std::max(max_nibble_count, block.nibbles.size() * 2);
+        if (block.step_index > 88) {
+            throw std::runtime_error("invalid ADPCM step index");
+        }
+        if (block.sample_count != expected_samples) {
+            throw std::runtime_error("ADPCM channel sample counts differ");
+        }
+        const size_t valid_nibbles = block.sample_count == 0 ? 0 : static_cast<size_t>(block.sample_count - 1);
+        if (block.nibbles.size() != (valid_nibbles + 1) / 2) {
+            throw std::runtime_error("ADPCM nibble payload size does not match sample count");
+        }
     }
 
-    std::vector<int16_t> pcm((max_nibble_count + 1) * channels);
+    if (static_cast<size_t>(expected_samples) > std::numeric_limits<size_t>::max() / channels) {
+        throw std::runtime_error("ADPCM output size overflow");
+    }
+    std::vector<int16_t> pcm(static_cast<size_t>(expected_samples) * channels);
+    if (expected_samples == 0) {
+        return pcm;
+    }
 
     for (uint16_t channel = 0; channel < channels; ++channel) {
         const ImaAdpcmBlock& block = blocks[channel];
         int predictor = block.predictor;
         int step_index = block.step_index;
-        size_t frame = 0;
 
         pcm[channel] = clamp_to_pcm16(predictor);
-        frame = 1;
+        size_t frame = 1;
+        const size_t valid_nibbles = static_cast<size_t>(block.sample_count - 1);
 
-        for (uint8_t packed_byte : block.nibbles) {
-            for (int half = 0; half < 2 && frame < max_nibble_count + 1; ++half) {
-                const uint8_t nibble = static_cast<uint8_t>((half == 0 ? packed_byte : packed_byte >> 4) & 0x0F);
-                pcm[frame * channels + channel] = decode_nibble(nibble, predictor, step_index);
-                ++frame;
-            }
+        for (size_t nibble_index = 0; nibble_index < valid_nibbles; ++nibble_index) {
+            const uint8_t packed_byte = block.nibbles[nibble_index / 2];
+            const uint8_t nibble = static_cast<uint8_t>(((nibble_index % 2 == 0) ? packed_byte : (packed_byte >> 4)) & 0x0F);
+            pcm[frame * channels + channel] = decode_nibble(nibble, predictor, step_index);
+            ++frame;
         }
     }
 
@@ -185,11 +204,15 @@ void write_ima_adpcm_stream(const std::string& path,
     file.write("CADP", 4);
     write_u16(file, channels);
     write_u32(file, sample_rate);
+    if (blocks.size() > std::numeric_limits<uint32_t>::max()) {
+        throw std::runtime_error("too many ADPCM blocks to write");
+    }
     write_u32(file, static_cast<uint32_t>(blocks.size()));
 
     for (const ImaAdpcmBlock& block : blocks) {
         write_u16(file, static_cast<uint16_t>(block.predictor));
         file.put(static_cast<char>(block.step_index));
+        write_u32(file, block.sample_count);
         write_u32(file, static_cast<uint32_t>(block.nibbles.size()));
         file.write(reinterpret_cast<const char*>(block.nibbles.data()),
                    static_cast<std::streamsize>(block.nibbles.size()));
