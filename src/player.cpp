@@ -12,6 +12,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
@@ -85,7 +86,8 @@ struct PlaybackState
     const std::vector<carrot::ImageRgb> &frames;
     const AudioState &audio_state;
     SDL_AudioStream *audio_stream = nullptr;
-    double fps = 25.0;
+    double fps = 10.0;
+    double loop_duration = 0.0;
     size_t current_frame = 0;
     double audio_pts = 0.0;
     double video_pts = 0.0;
@@ -97,6 +99,7 @@ struct DiagnosticsState
     using Clock = std::chrono::steady_clock;
     Clock::time_point last_report = Clock::now();
     uint64_t rendered_frames = 0;
+    bool has_printed_report = false;
 };
 
 GLuint compile_shader(GLenum type, const char *source)
@@ -278,24 +281,32 @@ void print_diagnostics_if_due(const PlaybackState &playback, DiagnosticsState &d
     }
 
     const double measured_fps = static_cast<double>(diagnostics.rendered_frames) / elapsed.count();
+    if (diagnostics.has_printed_report) {
+        std::cout << "\033[5F";
+    }
+
     std::cout << std::fixed << std::setprecision(2)
-              << "FPS: " << measured_fps << '\n'
-              << "Frame: " << playback.current_frame << '\n'
+              << "\033[2KFPS: " << measured_fps << '\n'
+              << "\033[2KFrame: " << playback.current_frame << '\n'
               << std::setprecision(3)
-              << "Audio PTS: " << playback.audio_pts << '\n'
-              << "Video PTS: " << playback.video_pts << '\n'
+              << "\033[2KAudio PTS: " << playback.audio_pts << '\n'
+              << "\033[2KVideo PTS: " << playback.video_pts << '\n'
               << std::setprecision(1)
-              << "AV Delta: " << (playback.av_delta_ms >= 0.0 ? "+" : "")
+              << "\033[2KAV Delta: " << (playback.av_delta_ms >= 0.0 ? "+" : "")
               << playback.av_delta_ms << " ms\n"
               << std::flush;
 
+    diagnostics.has_printed_report = true;
     diagnostics.last_report = now;
     diagnostics.rendered_frames = 0;
 }
 
 void update(PlaybackState &playback)
 {
-    playback.audio_pts = audio_clock_seconds(playback.audio_state, playback.audio_stream);
+    const double raw_audio_pts = audio_clock_seconds(playback.audio_state, playback.audio_stream);
+    playback.audio_pts = playback.loop_duration > 0.0
+        ? std::fmod(raw_audio_pts, playback.loop_duration)
+        : raw_audio_pts;
 
     const size_t next_frame =
         static_cast<size_t>(playback.audio_pts * playback.fps) % playback.frames.size();
@@ -327,8 +338,8 @@ void destroy_renderer(const Renderer &renderer)
 std::vector<carrot::ImageRgb> load_decoded_frames(const std::string &folder)
 {
     const std::vector<carrot::MjpegFrame> encoded_frames = carrot::encode_folder(folder, 100);
-    std::filesystem::create_directories("media");
-    carrot::write_mjpeg_stream("media/video.mjpeg", encoded_frames);
+    std::filesystem::create_directories("media/out");
+    carrot::write_mjpeg_stream("media/out/video.mjpeg", encoded_frames);
     const carrot::MjpegDecoder decoder;
     std::vector<carrot::ImageRgb> decoded_frames;
     decoded_frames.reserve(encoded_frames.size());
@@ -367,8 +378,8 @@ int carrot::run_player(int argc, char **argv)
         const carrot::ImaAdpcmDecoder audio_decoder;
         const std::vector<carrot::ImaAdpcmBlock> encoded_audio = audio_encoder.encode(wav.samples,
                                                                                       wav.channels);
-        std::filesystem::create_directories("media");
-        carrot::write_ima_adpcm_stream("media/audio.adpcm",
+        std::filesystem::create_directories("media/out");
+        carrot::write_ima_adpcm_stream("media/out/audio.adpcm",
                                        encoded_audio,
                                        wav.channels,
                                        wav.sample_rate);
@@ -378,13 +389,18 @@ int carrot::run_player(int argc, char **argv)
         if (frames.empty()) {
             throw std::runtime_error("no PNG frames found in: " + frames_folder);
         }
+        for (const auto &frame : frames) {
+            if (frame.width != frames.front().width || frame.height != frames.front().height) {
+                throw std::runtime_error("all video frames must have the same dimensions");
+            }
+        }
 
         if (!SDL_Init(SDL_INIT_AUDIO | SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
             throw std::runtime_error(SDL_GetError());
         }
 
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 6);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
         SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
@@ -400,7 +416,9 @@ int carrot::run_player(int argc, char **argv)
         if (gl_context == nullptr) {
             throw std::runtime_error(SDL_GetError());
         }
-        gladLoadGL(SDL_GL_GetProcAddress);
+        if (!gladLoadGL(SDL_GL_GetProcAddress)) {
+            throw std::runtime_error("failed to load OpenGL functions");
+        }
         SDL_GL_SetSwapInterval(1);
 
         AudioState audio_state;
@@ -439,6 +457,7 @@ int carrot::run_player(int argc, char **argv)
 
         bool running = true;
         PlaybackState playback{frames, audio_state, audio_stream, fps};
+        playback.loop_duration = static_cast<double>(frames.size()) / fps;
         DiagnosticsState diagnostics;
 
         while (running) {
