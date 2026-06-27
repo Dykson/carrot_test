@@ -21,6 +21,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -83,12 +84,15 @@ struct Renderer
 
 struct PlaybackState
 {
+    using Clock = std::chrono::steady_clock;
+
     const std::vector<carrot::ImageRgb> &frames;
     const AudioState &audio_state;
     SDL_AudioStream *audio_stream = nullptr;
+    Clock::time_point start_time = Clock::now();
     double fps = 10.0;
     double loop_duration = 0.0;
-    size_t current_frame = 0;
+    size_t current_frame = std::numeric_limits<size_t>::max();
     double audio_pts = 0.0;
     double video_pts = 0.0;
     double av_delta_ms = 0.0;
@@ -308,14 +312,19 @@ void update(PlaybackState &playback)
         ? std::fmod(raw_audio_pts, playback.loop_duration)
         : raw_audio_pts;
 
+    const std::chrono::duration<double> elapsed = PlaybackState::Clock::now() - playback.start_time;
+    const double raw_video_pts = elapsed.count();
+    const double video_pts = playback.loop_duration > 0.0
+        ? std::fmod(raw_video_pts, playback.loop_duration)
+        : raw_video_pts;
     const size_t next_frame =
-        static_cast<size_t>(playback.audio_pts * playback.fps) % playback.frames.size();
+        static_cast<size_t>(video_pts * playback.fps) % playback.frames.size();
     if (next_frame != playback.current_frame) {
         playback.current_frame = next_frame;
         upload_frame(playback.frames[playback.current_frame]);
     }
 
-    playback.video_pts = static_cast<double>(playback.current_frame) / playback.fps;
+    playback.video_pts = video_pts;
     playback.av_delta_ms = (playback.video_pts - playback.audio_pts) * 1000.0;
 }
 
@@ -456,7 +465,9 @@ int carrot::run_player(int argc, char **argv)
         SDL_ResumeAudioStreamDevice(audio_stream);
 
         bool running = true;
-        PlaybackState playback{frames, audio_state, audio_stream, fps};
+        PlaybackState playback{frames, audio_state, audio_stream};
+        playback.start_time = PlaybackState::Clock::now();
+        playback.fps = fps;
         playback.loop_duration = static_cast<double>(frames.size()) / fps;
         DiagnosticsState diagnostics;
 
@@ -465,6 +476,7 @@ int carrot::run_player(int argc, char **argv)
             update(playback);
             render(renderer, playback, diagnostics);
             SDL_GL_SwapWindow(window);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
         SDL_DestroyAudioStream(audio_stream);
