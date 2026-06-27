@@ -27,6 +27,7 @@ int run_adpcm_roundtrip(const char* input_path, const char* output_path) {
     const carrot::ImaAdpcmDecoder decoder;
 
     const std::vector<carrot::ImaAdpcmBlock> encoded = encoder.encode(wav.samples, wav.channels);
+    std::filesystem::create_directories("media/out");
     carrot::write_ima_adpcm_stream("media/out/audio.adpcm", encoded, wav.channels, wav.sample_rate);
     wav.samples = decoder.decode(encoded, wav.channels);
     carrot::write_wav_pcm16(output_path, wav);
@@ -35,6 +36,7 @@ int run_adpcm_roundtrip(const char* input_path, const char* output_path) {
 
 int run_mjpeg_roundtrip(const char* input_folder, const char* output_folder) {
     const std::vector<carrot::MjpegFrame> encoded_frames = carrot::encode_folder(input_folder, 50);
+    std::filesystem::create_directories("media/out");
     carrot::write_mjpeg_stream("media/out/video.mjpeg", encoded_frames);
     carrot::decode_folder(encoded_frames, output_folder);
     return 0;

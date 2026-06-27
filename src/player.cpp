@@ -86,7 +86,7 @@ struct PlaybackState
     const std::vector<carrot::ImageRgb> &frames;
     const AudioState &audio_state;
     SDL_AudioStream *audio_stream = nullptr;
-    double fps = 25.0;
+    double fps = 10.0;
     double loop_duration = 0.0;
     size_t current_frame = 0;
     double audio_pts = 0.0;
@@ -338,6 +338,7 @@ void destroy_renderer(const Renderer &renderer)
 std::vector<carrot::ImageRgb> load_decoded_frames(const std::string &folder)
 {
     const std::vector<carrot::MjpegFrame> encoded_frames = carrot::encode_folder(folder, 100);
+    std::filesystem::create_directories("media/out");
     carrot::write_mjpeg_stream("media/out/video.mjpeg", encoded_frames);
     const carrot::MjpegDecoder decoder;
     std::vector<carrot::ImageRgb> decoded_frames;
@@ -377,6 +378,7 @@ int carrot::run_player(int argc, char **argv)
         const carrot::ImaAdpcmDecoder audio_decoder;
         const std::vector<carrot::ImaAdpcmBlock> encoded_audio = audio_encoder.encode(wav.samples,
                                                                                       wav.channels);
+        std::filesystem::create_directories("media/out");
         carrot::write_ima_adpcm_stream("media/out/audio.adpcm",
                                        encoded_audio,
                                        wav.channels,
@@ -387,13 +389,18 @@ int carrot::run_player(int argc, char **argv)
         if (frames.empty()) {
             throw std::runtime_error("no PNG frames found in: " + frames_folder);
         }
+        for (const auto &frame : frames) {
+            if (frame.width != frames.front().width || frame.height != frames.front().height) {
+                throw std::runtime_error("all video frames must have the same dimensions");
+            }
+        }
 
         if (!SDL_Init(SDL_INIT_AUDIO | SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
             throw std::runtime_error(SDL_GetError());
         }
 
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 6);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
         SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
@@ -409,7 +416,9 @@ int carrot::run_player(int argc, char **argv)
         if (gl_context == nullptr) {
             throw std::runtime_error(SDL_GetError());
         }
-        gladLoadGL(SDL_GL_GetProcAddress);
+        if (!gladLoadGL(SDL_GL_GetProcAddress)) {
+            throw std::runtime_error("failed to load OpenGL functions");
+        }
         SDL_GL_SetSwapInterval(1);
 
         AudioState audio_state;

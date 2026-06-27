@@ -54,6 +54,7 @@ QuantizationConfig quantization_config(int quality) {
 }
 
 void write_i16(std::vector<uint8_t>& output, int value) {
+    value = std::clamp(value, -32768, 32767);
     output.push_back(static_cast<uint8_t>(value & 0xFF));
     output.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
 }
@@ -436,7 +437,13 @@ MjpegFrame MjpegEncoder::encode(const ImageRgb& image) const {
     const std::vector<double> chroma_red = make_subsampled_chroma_component(image, true);
 
     MjpegFrame frame{image.width, image.height, {}};
-    frame.bitstream.insert(frame.bitstream.end(), {'S', 'J', 'R', '3', static_cast<uint8_t>(quantization.luma), static_cast<uint8_t>(quantization.chroma)});
+    frame.bitstream.insert(frame.bitstream.end(),
+                           {'C',
+                            'J',
+                            'P',
+                            'G',
+                            static_cast<uint8_t>(quantization.luma),
+                            static_cast<uint8_t>(quantization.chroma)});
 
     encode_component(frame.bitstream, luma, image.width, image.height, quantization.luma);
     encode_component(frame.bitstream, chroma_blue, chroma_width, chroma_height, quantization.chroma);
@@ -450,7 +457,8 @@ ImageRgb MjpegDecoder::decode(const MjpegFrame& frame) const {
         throw std::runtime_error("bad simplified MJPEG frame dimensions");
     }
     (void)rgb_byte_count(frame.width, frame.height);
-    if (frame.bitstream.size() < 6 || std::string(reinterpret_cast<const char*>(frame.bitstream.data()), 4) != "SJR3") {
+    if (frame.bitstream.size() < 6
+        || std::string(reinterpret_cast<const char *>(frame.bitstream.data()), 4) != "CJPG") {
         throw std::runtime_error("bad simplified MJPEG stream magic/header");
     }
 
@@ -509,10 +517,11 @@ ImageRgb load_png_rgb(const std::string& path) {
 }
 
 void save_png_rgb(const std::string& path, const ImageRgb& image) {
-    (void)rgb_byte_count(image.width, image.height);
-    if (image.pixels.size() != rgb_byte_count(image.width, image.height)) {
+    const size_t expected_bytes = rgb_byte_count(image.width, image.height);
+    if (image.pixels.size() != expected_bytes) {
         throw std::runtime_error("invalid RGB image");
     }
+
     const int stride_bytes = image.width * 3;
     if (!stbi_write_png(path.c_str(), image.width, image.height, 3, image.pixels.data(), stride_bytes)) {
         throw std::runtime_error("failed to write image: " + path);
@@ -525,7 +534,12 @@ std::vector<MjpegFrame> encode_folder(const std::string& folder, int quality) {
 
     std::vector<std::filesystem::path> png_paths;
     for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator(folder)) {
-        if (entry.path().extension() == ".png") {
+        auto ext = entry.path().extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
+            return std::tolower(c);
+        });
+
+        if (ext == ".png") {
             png_paths.push_back(entry.path());
         }
     }
@@ -555,7 +569,7 @@ void write_mjpeg_stream(const std::string& path, const std::vector<MjpegFrame>& 
         throw std::runtime_error("cannot create MJPEG file: " + path);
     }
 
-    file.write("CMJ2", 4);
+    file.write("CMJP", 4);
     write_u32(file, checked_u32(frames.size(), "frame count"));
 
     for (const MjpegFrame& frame : frames) {
@@ -567,6 +581,9 @@ void write_mjpeg_stream(const std::string& path, const std::vector<MjpegFrame>& 
         write_u32(file, checked_u32(frame.bitstream.size(), "frame bitstream size"));
         file.write(reinterpret_cast<const char*>(frame.bitstream.data()),
                    static_cast<std::streamsize>(frame.bitstream.size()));
+    }
+    if (!file) {
+        throw std::runtime_error("failed to write MJPEG file: " + path);
     }
 }
 
