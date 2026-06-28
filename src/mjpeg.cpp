@@ -6,7 +6,6 @@
 #include "stb_image_write.h"
 
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <filesystem>
 #include <stdexcept>
@@ -15,30 +14,9 @@
 namespace carrot {
 namespace {
 
-constexpr double kPi = 3.14159265358979323846;
 constexpr double kInvSqrt2 = 0.70710678118654752440;
 constexpr int kBlockSize = 8;
 
-using DctBasis = std::array<std::array<double, kBlockSize>, kBlockSize>;
-
-const DctBasis& dct_basis() {
-    static const DctBasis basis = [] {
-        DctBasis table{};
-        for (int frequency = 0; frequency < kBlockSize; ++frequency) {
-            for (int sample = 0; sample < kBlockSize; ++sample) {
-                table[frequency][sample] =
-                    std::cos((2 * sample + 1) * frequency * kPi / 16.0);
-            }
-        }
-        return table;
-    }();
-
-    return basis;
-}
-
-double dct_alpha(int frequency) {
-    return frequency == 0 ? kInvSqrt2 : 1.0;
-}
 
 int quantization_scale(int quality) {
     return std::max(1, 101 - std::clamp(quality, 1, 100));
@@ -65,47 +43,136 @@ uint8_t pixel_at_clamped(const ImageRgb& image, int x, int y, int channel) {
     return image.pixels[(clamped_y * image.width + clamped_x) * 3 + channel];
 }
 
+void forward_dct_1d_llm(const double input[kBlockSize], double output[kBlockSize]) {
+    // Loeffler-Ligtenberg-Moschytz 8-point DCT, adapted from:
+    // https://github.com/norishigefukushima/dct_simd/blob/master/dct/dct8x8_simd.cpp
+    constexpr double r1 = 1.3870398453221475;  // sqrt(2) * cos(pi / 16)
+    constexpr double r2 = 1.3065629648763766;  // sqrt(2) * cos(2pi / 16)
+    constexpr double r3 = 1.1758756024193588;  // sqrt(2) * cos(3pi / 16)
+    constexpr double r5 = 0.7856949583871022;  // sqrt(2) * cos(5pi / 16)
+    constexpr double r6 = 0.5411961001461971;  // sqrt(2) * cos(6pi / 16)
+    constexpr double r7 = 0.2758993792829431;  // sqrt(2) * cos(7pi / 16)
+
+    const double t0 = input[0] + input[7];
+    const double t7 = input[0] - input[7];
+    const double t1 = input[1] + input[6];
+    const double t6 = input[1] - input[6];
+    const double t2 = input[2] + input[5];
+    const double t5 = input[2] - input[5];
+    const double t3 = input[3] + input[4];
+    const double t4 = input[3] - input[4];
+
+    const double c0 = t0 + t3;
+    const double c3 = t0 - t3;
+    const double c1 = t1 + t2;
+    const double c2 = t1 - t2;
+
+    output[0] = c0 + c1;
+    output[4] = c0 - c1;
+    output[2] = c2 * r6 + c3 * r2;
+    output[6] = c3 * r6 - c2 * r2;
+
+    const double c3_odd = t4 * r3 + t7 * r5;
+    const double c0_odd = t7 * r3 - t4 * r5;
+    const double c2_odd = t5 * r1 + t6 * r7;
+    const double c1_odd = t6 * r1 - t5 * r7;
+
+    output[5] = c3_odd - c1_odd;
+    output[3] = c0_odd - c2_odd;
+
+    const double c0_rotated = (c0_odd + c2_odd) * kInvSqrt2;
+    const double c3_rotated = (c3_odd + c1_odd) * kInvSqrt2;
+    output[1] = c0_rotated + c3_rotated;
+    output[7] = c0_rotated - c3_rotated;
+}
+
+void inverse_dct_1d_llm(const double input[kBlockSize], double output[kBlockSize]) {
+    // Loeffler-Ligtenberg-Moschytz 8-point IDCT, adapted from:
+    // https://github.com/norishigefukushima/dct_simd/blob/master/dct/dct8x8_simd.cpp
+    constexpr double r1 = 1.3870398453221475;  // sqrt(2) * cos(pi / 16)
+    constexpr double r2 = 1.3065629648763766;  // sqrt(2) * cos(2pi / 16)
+    constexpr double r3 = 1.1758756024193588;  // sqrt(2) * cos(3pi / 16)
+    constexpr double r5 = 0.7856949583871022;  // sqrt(2) * cos(5pi / 16)
+    constexpr double r6 = 0.5411961001461971;  // sqrt(2) * cos(6pi / 16)
+    constexpr double r7 = 0.2758993792829431;  // sqrt(2) * cos(7pi / 16)
+
+    double z0 = input[1] + input[7];
+    double z1 = input[3] + input[5];
+    double z2 = input[3] + input[7];
+    double z3 = input[1] + input[5];
+    const double z4 = (z0 + z1) * r3;
+
+    z0 *= -r3 + r7;
+    z1 *= -r3 - r1;
+    z2 = z2 * (-r3 - r5) + z4;
+    z3 = z3 * (-r3 + r5) + z4;
+
+    const double b3 = input[7] * (-r1 + r3 + r5 - r7) + z0 + z2;
+    const double b2 = input[5] * (r1 + r3 - r5 + r7) + z1 + z3;
+    const double b1 = input[3] * (r1 + r3 + r5 - r7) + z1 + z2;
+    const double b0 = input[1] * (r1 + r3 - r5 - r7) + z0 + z3;
+
+    const double z4_even = (input[2] + input[6]) * r6;
+    z0 = input[0] + input[4];
+    z1 = input[0] - input[4];
+    z2 = z4_even - input[6] * (r2 + r6);
+    z3 = z4_even + input[2] * (r2 - r6);
+
+    const double a0 = z0 + z3;
+    const double a3 = z0 - z3;
+    const double a1 = z1 + z2;
+    const double a2 = z1 - z2;
+
+    output[0] = a0 + b0;
+    output[7] = a0 - b0;
+    output[1] = a1 + b1;
+    output[6] = a1 - b1;
+    output[2] = a2 + b2;
+    output[5] = a2 - b2;
+    output[3] = a3 + b3;
+    output[4] = a3 - b3;
+}
+
 void forward_dct_block(const double input[kBlockSize][kBlockSize], double output[kBlockSize][kBlockSize]) {
-    const DctBasis& basis = dct_basis();
+    double temp[kBlockSize][kBlockSize]{};
+    double column[kBlockSize]{};
+    double transformed[kBlockSize]{};
 
-    for (int v = 0; v < kBlockSize; ++v) {
-        const double cv = dct_alpha(v);
+    for (int y = 0; y < kBlockSize; ++y) {
+        forward_dct_1d_llm(input[y], temp[y]);
+    }
 
-        for (int u = 0; u < kBlockSize; ++u) {
-            const double cu = dct_alpha(u);
-            double sum = 0.0;
+    for (int x = 0; x < kBlockSize; ++x) {
+        for (int y = 0; y < kBlockSize; ++y) {
+            column[y] = temp[y][x];
+        }
 
-            for (int y = 0; y < kBlockSize; ++y) {
-                const double basis_y = basis[v][y];
+        forward_dct_1d_llm(column, transformed);
 
-                for (int x = 0; x < kBlockSize; ++x) {
-                    sum += input[y][x] * basis[u][x] * basis_y;
-                }
-            }
-
-            output[v][u] = 0.25 * cu * cv * sum;
+        for (int y = 0; y < kBlockSize; ++y) {
+            output[y][x] = transformed[y] * 0.125;
         }
     }
 }
 
 void inverse_dct_block(const double input[kBlockSize][kBlockSize], double output[kBlockSize][kBlockSize]) {
-    const DctBasis& basis = dct_basis();
+    double temp[kBlockSize][kBlockSize]{};
+    double column[kBlockSize]{};
+    double transformed[kBlockSize]{};
 
     for (int y = 0; y < kBlockSize; ++y) {
-        for (int x = 0; x < kBlockSize; ++x) {
-            double sum = 0.0;
+        inverse_dct_1d_llm(input[y], temp[y]);
+    }
 
-            for (int v = 0; v < kBlockSize; ++v) {
-                const double cv = dct_alpha(v);
-                const double basis_y = basis[v][y];
+    for (int x = 0; x < kBlockSize; ++x) {
+        for (int y = 0; y < kBlockSize; ++y) {
+            column[y] = temp[y][x];
+        }
 
-                for (int u = 0; u < kBlockSize; ++u) {
-                    const double cu = dct_alpha(u);
-                    sum += cu * cv * input[v][u] * basis[u][x] * basis_y;
-                }
-            }
+        inverse_dct_1d_llm(column, transformed);
 
-            output[y][x] = 0.25 * sum;
+        for (int y = 0; y < kBlockSize; ++y) {
+            output[y][x] = transformed[y] * 0.125;
         }
     }
 }

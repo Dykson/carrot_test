@@ -5,18 +5,17 @@
 #include "wav.h"
 
 #include <SDL3/SDL.h>
-#if defined(CARROT_WITH_GLAD)
-#include <glad/glad.h>
-#else
-#include <SDL3/SDL_opengl.h>
-#endif
+#define GLAD_GL_IMPLEMENTATION
+#include <glad/gl.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <exception>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -30,34 +29,115 @@ struct AudioState
     std::atomic<uint32_t> cursor{0};
 };
 
-void audio_callback(void *userdata,
-                    SDL_AudioStream *stream,
-                    int additional_amount,
-                    int /*total_amount*/)
+static void audio_callback(void *userdata,
+                           SDL_AudioStream *stream,
+                           int additional_amount,
+                           int /*total_amount*/)
 {
     auto *state = static_cast<AudioState *>(userdata);
 
-    if (additional_amount <= 0) {
+    if (state == nullptr || state->data == nullptr || state->byte_count == 0) {
         return;
     }
 
-    const uint32_t cursor = state->cursor.load(std::memory_order_relaxed);
-    if (cursor >= state->byte_count) {
-        return;
-    }
+    int bytes_to_write = additional_amount;
 
-    const uint32_t available = state->byte_count - cursor;
-    const uint32_t bytes_to_copy = std::min<uint32_t>(available,
-                                                      static_cast<uint32_t>(additional_amount));
-    SDL_PutAudioStreamData(stream, state->data + cursor, static_cast<int>(bytes_to_copy));
-    state->cursor.store(cursor + bytes_to_copy, std::memory_order_relaxed);
+    while (bytes_to_write > 0) {
+        uint32_t cursor = state->cursor.load(std::memory_order_relaxed);
+
+        if (cursor >= state->byte_count) {
+            cursor = 0;
+        }
+
+        const uint32_t bytes_left_until_loop = state->byte_count - cursor;
+        const uint32_t chunk_size = std::min<uint32_t>(static_cast<uint32_t>(bytes_to_write),
+                                                       bytes_left_until_loop);
+
+        SDL_PutAudioStreamData(stream, state->data + cursor, static_cast<int>(chunk_size));
+
+        cursor += chunk_size;
+
+        if (cursor >= state->byte_count) {
+            cursor = 0;
+        }
+
+        state->cursor.store(cursor, std::memory_order_relaxed);
+
+        bytes_to_write -= static_cast<int>(chunk_size);
+    }
 }
 
-GLuint create_texture(const carrot::ImageRgb &first_frame)
+struct Renderer
 {
     GLuint texture = 0;
-    glGenTextures(1, &texture);
-    glBindTexture(GL_TEXTURE_2D, texture);
+    GLuint program = 0;
+    GLuint vertex_array = 0;
+    GLuint vertex_buffer = 0;
+};
+
+GLuint compile_shader(GLenum type, const char *source)
+{
+    const GLuint shader = glCreateShader(type);
+    glShaderSource(shader, 1, &source, nullptr);
+    glCompileShader(shader);
+
+    GLint success = GL_FALSE;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
+    if (success == GL_TRUE) {
+        return shader;
+    }
+
+    std::array<GLchar, 512> log{};
+    glGetShaderInfoLog(shader, static_cast<GLsizei>(log.size()), nullptr, log.data());
+    glDeleteShader(shader);
+    throw std::runtime_error(std::string("shader compilation failed: ") + log.data());
+}
+
+GLuint create_program()
+{
+    const GLuint vertex_shader = compile_shader(GL_VERTEX_SHADER,
+                                                "#version 330 core\n"
+                                                "layout(location = 0) in vec2 position;\n"
+                                                "layout(location = 1) in vec2 tex_coord;\n"
+                                                "out vec2 uv;\n"
+                                                "void main() {\n"
+                                                "    uv = tex_coord;\n"
+                                                "    gl_Position = vec4(position, 0.0, 1.0);\n"
+                                                "}\n");
+    const GLuint fragment_shader = compile_shader(GL_FRAGMENT_SHADER,
+                                                  "#version 330 core\n"
+                                                  "in vec2 uv;\n"
+                                                  "out vec4 color;\n"
+                                                  "uniform sampler2D frame_texture;\n"
+                                                  "void main() {\n"
+                                                  "    color = texture(frame_texture, uv);\n"
+                                                  "}\n");
+    const GLuint program = glCreateProgram();
+    glAttachShader(program, vertex_shader);
+    glAttachShader(program, fragment_shader);
+    glLinkProgram(program);
+    glDeleteShader(vertex_shader);
+    glDeleteShader(fragment_shader);
+
+    GLint success = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &success);
+    if (success == GL_TRUE) {
+        return program;
+    }
+
+    std::array<GLchar, 512> log{};
+    glGetProgramInfoLog(program, static_cast<GLsizei>(log.size()), nullptr, log.data());
+    glDeleteProgram(program);
+    throw std::runtime_error(std::string("shader linking failed: ") + log.data());
+}
+
+Renderer create_renderer(const carrot::ImageRgb &first_frame)
+{
+    Renderer renderer{};
+    renderer.program = create_program();
+
+    glGenTextures(1, &renderer.texture);
+    glBindTexture(GL_TEXTURE_2D, renderer.texture);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -71,33 +151,71 @@ GLuint create_texture(const carrot::ImageRgb &first_frame)
                  GL_RGB,
                  GL_UNSIGNED_BYTE,
                  first_frame.pixels.data());
-    return texture;
+
+    constexpr std::array<float, 16> vertices{
+        -1.0F,
+        -1.0F,
+        0.0F,
+        1.0F,
+        1.0F,
+        -1.0F,
+        1.0F,
+        1.0F,
+        -1.0F,
+        1.0F,
+        0.0F,
+        0.0F,
+        1.0F,
+        1.0F,
+        1.0F,
+        0.0F,
+    };
+
+    glGenVertexArrays(1, &renderer.vertex_array);
+    glBindVertexArray(renderer.vertex_array);
+    glGenBuffers(1, &renderer.vertex_buffer);
+    glBindBuffer(GL_ARRAY_BUFFER, renderer.vertex_buffer);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(vertices.size() * sizeof(float)),
+                 vertices.data(),
+                 GL_STATIC_DRAW);
+
+    constexpr GLsizei stride = 4 * sizeof(float);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, stride, nullptr);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1,
+                          2,
+                          GL_FLOAT,
+                          GL_FALSE,
+                          stride,
+                          reinterpret_cast<void *>(2 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+
+    glUseProgram(renderer.program);
+    glUniform1i(glGetUniformLocation(renderer.program, "frame_texture"), 0);
+    return renderer;
 }
 
-void draw_textured_fullscreen_quad(GLuint texture)
+void draw_textured_fullscreen_quad(const Renderer &renderer)
 {
     glClear(GL_COLOR_BUFFER_BIT);
-    glEnable(GL_TEXTURE_2D);
-    glBindTexture(GL_TEXTURE_2D, texture);
+    glUseProgram(renderer.program);
+    glBindVertexArray(renderer.vertex_array);
+    glBindTexture(GL_TEXTURE_2D, renderer.texture);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
 
-    // The context is requested as OpenGL 4.6. For a compact test-player implementation
-    // this uses the compatibility profile immediate-mode path; swapping it for a glad-loaded
-    // shader/VBO path does not affect the codec synchronization logic.
-    glBegin(GL_TRIANGLE_STRIP);
-    glTexCoord2f(0.0F, 1.0F);
-    glVertex2f(-1.0F, -1.0F);
-    glTexCoord2f(1.0F, 1.0F);
-    glVertex2f(1.0F, -1.0F);
-    glTexCoord2f(0.0F, 0.0F);
-    glVertex2f(-1.0F, 1.0F);
-    glTexCoord2f(1.0F, 0.0F);
-    glVertex2f(1.0F, 1.0F);
-    glEnd();
+void destroy_renderer(const Renderer &renderer)
+{
+    glDeleteBuffers(1, &renderer.vertex_buffer);
+    glDeleteVertexArrays(1, &renderer.vertex_array);
+    glDeleteProgram(renderer.program);
+    glDeleteTextures(1, &renderer.texture);
 }
 
 std::vector<carrot::ImageRgb> load_decoded_frames(const std::string &folder)
 {
-    const std::vector<carrot::MjpegFrame> encoded_frames = carrot::encode_folder(folder, 50);
+    const std::vector<carrot::MjpegFrame> encoded_frames = carrot::encode_folder(folder, 100);
     const carrot::MjpegDecoder decoder;
     std::vector<carrot::ImageRgb> decoded_frames;
     decoded_frames.reserve(encoded_frames.size());
@@ -145,7 +263,7 @@ int carrot::run_player(int argc, char **argv)
 
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 6);
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
         SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
         SDL_Window *window = SDL_CreateWindow("Carrot codec player",
@@ -160,11 +278,7 @@ int carrot::run_player(int argc, char **argv)
         if (gl_context == nullptr) {
             throw std::runtime_error(SDL_GetError());
         }
-#if defined(CARROT_WITH_GLAD)
-        if (gladLoadGLLoader(reinterpret_cast<GLADloadproc>(SDL_GL_GetProcAddress)) == 0) {
-            throw std::runtime_error("failed to initialize glad");
-        }
-#endif
+        gladLoadGL(SDL_GL_GetProcAddress);
         SDL_GL_SetSwapInterval(1);
 
         AudioState audio_state;
@@ -184,7 +298,7 @@ int carrot::run_player(int argc, char **argv)
             throw std::runtime_error(SDL_GetError());
         }
 
-        GLuint texture = create_texture(frames.front());
+        Renderer renderer = create_renderer(frames.front());
         SDL_ResumeAudioStreamDevice(audio_stream);
 
         bool running = true;
@@ -201,11 +315,12 @@ int carrot::run_player(int argc, char **argv)
 
             const auto now = std::chrono::steady_clock::now();
             const double seconds = std::chrono::duration<double>(now - start_time).count();
-            const size_t frame_index = std::min<size_t>(static_cast<size_t>(seconds * fps),
-                                                        frames.size() - 1);
+
+            const size_t frame_index = static_cast<size_t>(seconds * fps) % frames.size();
+
             const carrot::ImageRgb &frame = frames[frame_index];
 
-            glBindTexture(GL_TEXTURE_2D, texture);
+            glBindTexture(GL_TEXTURE_2D, renderer.texture);
             glTexSubImage2D(GL_TEXTURE_2D,
                             0,
                             0,
@@ -216,19 +331,14 @@ int carrot::run_player(int argc, char **argv)
                             GL_UNSIGNED_BYTE,
                             frame.pixels.data());
 
-            draw_textured_fullscreen_quad(texture);
+            draw_textured_fullscreen_quad(renderer);
             SDL_GL_SwapWindow(window);
-
-            if (frame_index + 1 == frames.size()
-                && audio_state.cursor.load(std::memory_order_relaxed) >= audio_state.byte_count) {
-                running = false;
-            }
 
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
         SDL_DestroyAudioStream(audio_stream);
-        glDeleteTextures(1, &texture);
+        destroy_renderer(renderer);
         SDL_GL_DestroyContext(gl_context);
         SDL_DestroyWindow(window);
         SDL_Quit();
