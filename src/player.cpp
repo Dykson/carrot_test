@@ -15,7 +15,6 @@
 #include <cmath>
 #include <cstdint>
 #include <exception>
-#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -90,7 +89,7 @@ struct PlaybackState
     const AudioState &audio_state;
     SDL_AudioStream *audio_stream = nullptr;
     Clock::time_point start_time = Clock::now();
-    double fps = 10.0;
+    double fps = 25.0;
     double loop_duration = 0.0;
     size_t current_frame = std::numeric_limits<size_t>::max();
     bool frame_changed = false;
@@ -312,6 +311,7 @@ void process_events(bool &running)
 
 void print_diagnostics_if_due(const PlaybackState &playback, DiagnosticsState &diagnostics)
 {
+    static bool first_line = true;
     ++diagnostics.rendered_frames;
     if (playback.frame_changed) {
         ++diagnostics.advanced_frames;
@@ -326,16 +326,15 @@ void print_diagnostics_if_due(const PlaybackState &playback, DiagnosticsState &d
     const double measured_fps = static_cast<double>(diagnostics.rendered_frames) / elapsed.count();
     const double measured_frame_fps =
         static_cast<double>(diagnostics.advanced_frames) / elapsed.count();
-    if (diagnostics.has_printed_report) {
-        std::cout << "\033[3F";
+
+    if (first_line) {
+        std::cout << "Video start delay: " << playback.video_start_delay_seconds * 1000.0 << " ms\n"
+                  << std::flush;
+        first_line = false;
     }
 
-    std::cout << std::fixed << std::setprecision(2)
-              << "\033[2KRender FPS: " << measured_fps << '\n'
-              << "\033[2KFrame FPS: " << measured_frame_fps << '\n'
-              << std::setprecision(1)
-              << "\033[2KVideo start delay: "
-              << playback.video_start_delay_seconds * 1000.0 << " ms\n"
+    std::cout << std::fixed << std::setprecision(2) << "Render FPS: " << measured_fps << " | "
+              << "Frame FPS: " << measured_frame_fps << "\n"
               << std::flush;
 
     diagnostics.has_printed_report = true;
@@ -378,8 +377,6 @@ void destroy_renderer(const Renderer &renderer)
 std::vector<carrot::ImageRgb> load_decoded_frames(const std::string &folder)
 {
     const std::vector<carrot::MjpegFrame> encoded_frames = carrot::encode_folder(folder, 100);
-    std::filesystem::create_directories("media/out");
-    carrot::write_mjpeg_stream("media/out/video.mjpeg", encoded_frames);
     const carrot::MjpegDecoder decoder;
     std::vector<carrot::ImageRgb> decoded_frames;
     decoded_frames.reserve(encoded_frames.size());
@@ -418,11 +415,6 @@ int carrot::run_player(int argc, char **argv)
         const carrot::ImaAdpcmDecoder audio_decoder;
         const std::vector<carrot::ImaAdpcmBlock> encoded_audio = audio_encoder.encode(wav.samples,
                                                                                       wav.channels);
-        std::filesystem::create_directories("media/out");
-        carrot::write_ima_adpcm_stream("media/out/audio.adpcm",
-                                       encoded_audio,
-                                       wav.channels,
-                                       wav.sample_rate);
         wav.samples = audio_decoder.decode(encoded_audio, wav.channels);
 
         std::vector<carrot::ImageRgb> frames = load_decoded_frames(frames_folder);
