@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(CARROT_BUILD_PLAYER "Build SDL3/OpenGL player support when dependencies are available" ON)
-option(CARROT_BUILD_SELFTEST "Build codec smoke/self tests" ON)
+option(CARROT_BUILD_SELFTEST "Build codec smoke/self tests" OFF)
 
 add_library(carrot_codecs
     src/ima_adpcm.cpp
