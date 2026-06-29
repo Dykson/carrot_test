@@ -7,7 +7,6 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(CARROT_BUILD_PLAYER "Build SDL3/OpenGL player support when dependencies are available" ON)
 option(CARROT_BUILD_SELFTEST "Build codec smoke/self tests" ON)
-option(CARROT_PLAYER_AUDIO_CLOCK_MASTER "Use the audio playback clock as the player master clock instead of std::chrono::steady_clock" OFF)
 
 add_library(carrot_codecs
     src/ima_adpcm.cpp
@@ -40,9 +39,6 @@ if(CARROT_BUILD_PLAYER)
         target_link_libraries(codec_tool PRIVATE SDL3::SDL3)
         target_include_directories(codec_tool PRIVATE ${CARROT_GLAD_INCLUDE_DIR})
         target_compile_definitions(codec_tool PRIVATE CARROT_WITH_PLAYER=1)
-        if(CARROT_PLAYER_AUDIO_CLOCK_MASTER)
-            target_compile_definitions(codec_tool PRIVATE CARROT_PLAYER_AUDIO_CLOCK_MASTER=1)
-        endif()
     else()
         message(STATUS "SDL3 and/or glad were not found: codec_tool player mode will be disabled")
     endif()

@@ -93,31 +93,17 @@ struct PlaybackState
     double fps = 10.0;
     double loop_duration = 0.0;
     size_t current_frame = std::numeric_limits<size_t>::max();
-    double audio_pts = 0.0;
-    double video_pts = 0.0;
-    double av_delta_ms = 0.0;
-    bool audio_latency_compensation_initialized = false;
-    double audio_latency_compensation_seconds = 0.0;
+    bool frame_changed = false;
+    bool video_start_delay_initialized = false;
+    double video_start_delay_seconds = 0.0;
 };
-
-enum class PlayerMasterClock
-{
-    steady,
-    audio,
-};
-
-constexpr PlayerMasterClock kPlayerMasterClock =
-#if defined(CARROT_PLAYER_AUDIO_CLOCK_MASTER) && CARROT_PLAYER_AUDIO_CLOCK_MASTER
-    PlayerMasterClock::audio;
-#else
-    PlayerMasterClock::steady;
-#endif
 
 struct DiagnosticsState
 {
     using Clock = std::chrono::steady_clock;
     Clock::time_point last_report = Clock::now();
     uint64_t rendered_frames = 0;
+    uint64_t advanced_frames = 0;
     bool has_printed_report = false;
 };
 
@@ -265,31 +251,9 @@ double loop_clock_seconds(double raw_clock_seconds, double loop_duration)
     return std::fmod(raw_clock_seconds, loop_duration);
 }
 
-double loop_delta_seconds(double video_pts, double audio_pts, double loop_duration)
-{
-    double delta = video_pts - audio_pts;
-    if (loop_duration <= 0.0) {
-        return delta;
-    }
-
-    const double half_loop_duration = loop_duration / 2.0;
-    if (delta > half_loop_duration) {
-        delta -= loop_duration;
-    } else if (delta < -half_loop_duration) {
-        delta += loop_duration;
-    }
-
-    return delta;
-}
-
 size_t frame_index_from_pts(double pts, double fps, size_t frame_count)
 {
     return static_cast<size_t>(std::floor(pts * fps)) % frame_count;
-}
-
-double frame_pts_seconds(size_t frame_index, double fps)
-{
-    return static_cast<double>(frame_index) / fps;
 }
 
 double steady_clock_seconds(const PlaybackState &playback)
@@ -299,20 +263,18 @@ double steady_clock_seconds(const PlaybackState &playback)
     return elapsed.count();
 }
 
-double latency_compensated_steady_seconds(PlaybackState &playback,
-                                          double raw_steady_pts,
-                                          double raw_audio_pts)
+double video_clock_seconds(PlaybackState &playback, double raw_steady_pts, double raw_audio_pts)
 {
-    if (!playback.audio_latency_compensation_initialized) {
+    if (!playback.video_start_delay_initialized) {
         if (raw_audio_pts <= 0.0) {
             return 0.0;
         }
 
-        playback.audio_latency_compensation_seconds = std::max(0.0, raw_steady_pts - raw_audio_pts);
-        playback.audio_latency_compensation_initialized = true;
+        playback.video_start_delay_seconds = std::max(0.0, raw_steady_pts - raw_audio_pts);
+        playback.video_start_delay_initialized = true;
     }
 
-    return std::max(0.0, raw_steady_pts - playback.audio_latency_compensation_seconds);
+    return std::max(0.0, raw_steady_pts - playback.video_start_delay_seconds);
 }
 
 void draw_textured_fullscreen_quad(const Renderer &renderer)
@@ -351,6 +313,9 @@ void process_events(bool &running)
 void print_diagnostics_if_due(const PlaybackState &playback, DiagnosticsState &diagnostics)
 {
     ++diagnostics.rendered_frames;
+    if (playback.frame_changed) {
+        ++diagnostics.advanced_frames;
+    }
 
     const DiagnosticsState::Clock::time_point now = DiagnosticsState::Clock::now();
     const std::chrono::duration<double> elapsed = now - diagnostics.last_report;
@@ -359,52 +324,39 @@ void print_diagnostics_if_due(const PlaybackState &playback, DiagnosticsState &d
     }
 
     const double measured_fps = static_cast<double>(diagnostics.rendered_frames) / elapsed.count();
+    const double measured_frame_fps =
+        static_cast<double>(diagnostics.advanced_frames) / elapsed.count();
     if (diagnostics.has_printed_report) {
-        std::cout << "\033[5F";
+        std::cout << "\033[3F";
     }
 
     std::cout << std::fixed << std::setprecision(2)
-              << "\033[2KFPS: " << measured_fps << '\n'
-              << "\033[2KFrame: " << playback.current_frame << '\n'
-              << std::setprecision(3)
-              << "\033[2KAudio PTS: " << playback.audio_pts << '\n'
-              << "\033[2KVideo PTS: " << playback.video_pts << '\n'
+              << "\033[2KRender FPS: " << measured_fps << '\n'
+              << "\033[2KFrame FPS: " << measured_frame_fps << '\n'
               << std::setprecision(1)
-              << "\033[2KAV Delta: " << (playback.av_delta_ms >= 0.0 ? "+" : "")
-              << playback.av_delta_ms << " ms\n"
+              << "\033[2KVideo start delay: "
+              << playback.video_start_delay_seconds * 1000.0 << " ms\n"
               << std::flush;
 
     diagnostics.has_printed_report = true;
     diagnostics.last_report = now;
     diagnostics.rendered_frames = 0;
+    diagnostics.advanced_frames = 0;
 }
 
 void update(PlaybackState &playback)
 {
     const double raw_audio_pts = audio_clock_seconds(playback.audio_state, playback.audio_stream);
-    playback.audio_pts = loop_clock_seconds(raw_audio_pts, playback.loop_duration);
+    const double raw_steady_pts = steady_clock_seconds(playback);
+    const double video_clock = video_clock_seconds(playback, raw_steady_pts, raw_audio_pts);
+    const double video_pts = loop_clock_seconds(video_clock, playback.loop_duration);
+    const size_t next_frame = frame_index_from_pts(video_pts, playback.fps, playback.frames.size());
 
-    size_t next_frame = 0;
-    if constexpr (kPlayerMasterClock == PlayerMasterClock::audio) {
-        next_frame = static_cast<size_t>(std::floor(playback.audio_pts * playback.fps))
-            % playback.frames.size();
-    } else {
-        const double raw_steady_pts = steady_clock_seconds(playback);
-        const double compensated_steady_pts =
-            latency_compensated_steady_seconds(playback, raw_steady_pts, raw_audio_pts);
-        const double steady_pts = loop_clock_seconds(compensated_steady_pts,
-                                                     playback.loop_duration);
-        next_frame = frame_index_from_pts(steady_pts, playback.fps, playback.frames.size());
-    }
-
+    playback.frame_changed = next_frame != playback.current_frame;
     if (next_frame != playback.current_frame) {
         playback.current_frame = next_frame;
         upload_frame(playback.frames[playback.current_frame]);
     }
-
-    playback.video_pts = frame_pts_seconds(playback.current_frame, playback.fps);
-    playback.av_delta_ms =
-        loop_delta_seconds(playback.video_pts, playback.audio_pts, playback.loop_duration) * 1000.0;
 }
 
 void render(const Renderer &renderer,
