@@ -98,6 +98,19 @@ struct PlaybackState
     double av_delta_ms = 0.0;
 };
 
+enum class PlayerMasterClock
+{
+    steady,
+    audio,
+};
+
+constexpr PlayerMasterClock kPlayerMasterClock =
+#if defined(CARROT_PLAYER_AUDIO_CLOCK_MASTER) && CARROT_PLAYER_AUDIO_CLOCK_MASTER
+    PlayerMasterClock::audio;
+#else
+    PlayerMasterClock::steady;
+#endif
+
 struct DiagnosticsState
 {
     using Clock = std::chrono::steady_clock;
@@ -241,6 +254,15 @@ double audio_clock_seconds(const AudioState &state, SDL_AudioStream *stream)
     return static_cast<double>(played) / static_cast<double>(state.bytes_per_second);
 }
 
+double loop_clock_seconds(double raw_clock_seconds, double loop_duration)
+{
+    if (loop_duration <= 0.0) {
+        return raw_clock_seconds;
+    }
+
+    return std::fmod(raw_clock_seconds, loop_duration);
+}
+
 void draw_textured_fullscreen_quad(const Renderer &renderer)
 {
     glClear(GL_COLOR_BUFFER_BIT);
@@ -308,15 +330,14 @@ void print_diagnostics_if_due(const PlaybackState &playback, DiagnosticsState &d
 void update(PlaybackState &playback)
 {
     const double raw_audio_pts = audio_clock_seconds(playback.audio_state, playback.audio_stream);
-    playback.audio_pts = playback.loop_duration > 0.0
-        ? std::fmod(raw_audio_pts, playback.loop_duration)
-        : raw_audio_pts;
+    playback.audio_pts = loop_clock_seconds(raw_audio_pts, playback.loop_duration);
 
     const std::chrono::duration<double> elapsed = PlaybackState::Clock::now() - playback.start_time;
-    const double raw_video_pts = elapsed.count();
-    const double video_pts = playback.loop_duration > 0.0
-        ? std::fmod(raw_video_pts, playback.loop_duration)
-        : raw_video_pts;
+    const double raw_steady_pts = elapsed.count();
+    const double master_pts = kPlayerMasterClock == PlayerMasterClock::audio
+        ? raw_audio_pts
+        : raw_steady_pts;
+    const double video_pts = loop_clock_seconds(master_pts, playback.loop_duration);
     const size_t next_frame =
         static_cast<size_t>(video_pts * playback.fps) % playback.frames.size();
     if (next_frame != playback.current_frame) {
