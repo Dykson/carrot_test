@@ -96,6 +96,8 @@ struct PlaybackState
     double audio_pts = 0.0;
     double video_pts = 0.0;
     double av_delta_ms = 0.0;
+    bool audio_latency_compensation_initialized = false;
+    double audio_latency_compensation_seconds = 0.0;
 };
 
 enum class PlayerMasterClock
@@ -280,6 +282,39 @@ double loop_delta_seconds(double video_pts, double audio_pts, double loop_durati
     return delta;
 }
 
+size_t frame_index_from_pts(double pts, double fps, size_t frame_count)
+{
+    return static_cast<size_t>(std::floor(pts * fps)) % frame_count;
+}
+
+double frame_pts_seconds(size_t frame_index, double fps)
+{
+    return static_cast<double>(frame_index) / fps;
+}
+
+double steady_clock_seconds(const PlaybackState &playback)
+{
+    const std::chrono::duration<double> elapsed =
+        PlaybackState::Clock::now() - playback.start_time;
+    return elapsed.count();
+}
+
+double latency_compensated_steady_seconds(PlaybackState &playback,
+                                          double raw_steady_pts,
+                                          double raw_audio_pts)
+{
+    if (!playback.audio_latency_compensation_initialized) {
+        if (raw_audio_pts <= 0.0) {
+            return 0.0;
+        }
+
+        playback.audio_latency_compensation_seconds = std::max(0.0, raw_steady_pts - raw_audio_pts);
+        playback.audio_latency_compensation_initialized = true;
+    }
+
+    return std::max(0.0, raw_steady_pts - playback.audio_latency_compensation_seconds);
+}
+
 void draw_textured_fullscreen_quad(const Renderer &renderer)
 {
     glClear(GL_COLOR_BUFFER_BIT);
@@ -349,17 +384,17 @@ void update(PlaybackState &playback)
     const double raw_audio_pts = audio_clock_seconds(playback.audio_state, playback.audio_stream);
     playback.audio_pts = loop_clock_seconds(raw_audio_pts, playback.loop_duration);
 
-    double video_pts = 0.0;
     size_t next_frame = 0;
     if constexpr (kPlayerMasterClock == PlayerMasterClock::audio) {
         next_frame = static_cast<size_t>(std::floor(playback.audio_pts * playback.fps))
             % playback.frames.size();
-        video_pts = static_cast<double>(next_frame) / playback.fps;
     } else {
-        const std::chrono::duration<double> elapsed =
-            PlaybackState::Clock::now() - playback.start_time;
-        video_pts = loop_clock_seconds(elapsed.count(), playback.loop_duration);
-        next_frame = static_cast<size_t>(video_pts * playback.fps) % playback.frames.size();
+        const double raw_steady_pts = steady_clock_seconds(playback);
+        const double compensated_steady_pts =
+            latency_compensated_steady_seconds(playback, raw_steady_pts, raw_audio_pts);
+        const double steady_pts = loop_clock_seconds(compensated_steady_pts,
+                                                     playback.loop_duration);
+        next_frame = frame_index_from_pts(steady_pts, playback.fps, playback.frames.size());
     }
 
     if (next_frame != playback.current_frame) {
@@ -367,7 +402,7 @@ void update(PlaybackState &playback)
         upload_frame(playback.frames[playback.current_frame]);
     }
 
-    playback.video_pts = video_pts;
+    playback.video_pts = frame_pts_seconds(playback.current_frame, playback.fps);
     playback.av_delta_ms =
         loop_delta_seconds(playback.video_pts, playback.audio_pts, playback.loop_duration) * 1000.0;
 }
