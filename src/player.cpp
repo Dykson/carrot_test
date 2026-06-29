@@ -263,6 +263,23 @@ double loop_clock_seconds(double raw_clock_seconds, double loop_duration)
     return std::fmod(raw_clock_seconds, loop_duration);
 }
 
+double loop_delta_seconds(double video_pts, double audio_pts, double loop_duration)
+{
+    double delta = video_pts - audio_pts;
+    if (loop_duration <= 0.0) {
+        return delta;
+    }
+
+    const double half_loop_duration = loop_duration / 2.0;
+    if (delta > half_loop_duration) {
+        delta -= loop_duration;
+    } else if (delta < -half_loop_duration) {
+        delta += loop_duration;
+    }
+
+    return delta;
+}
+
 void draw_textured_fullscreen_quad(const Renderer &renderer)
 {
     glClear(GL_COLOR_BUFFER_BIT);
@@ -332,21 +349,27 @@ void update(PlaybackState &playback)
     const double raw_audio_pts = audio_clock_seconds(playback.audio_state, playback.audio_stream);
     playback.audio_pts = loop_clock_seconds(raw_audio_pts, playback.loop_duration);
 
-    const std::chrono::duration<double> elapsed = PlaybackState::Clock::now() - playback.start_time;
-    const double raw_steady_pts = elapsed.count();
-    const double master_pts = kPlayerMasterClock == PlayerMasterClock::audio
-        ? raw_audio_pts
-        : raw_steady_pts;
-    const double video_pts = loop_clock_seconds(master_pts, playback.loop_duration);
-    const size_t next_frame =
-        static_cast<size_t>(video_pts * playback.fps) % playback.frames.size();
+    double video_pts = 0.0;
+    size_t next_frame = 0;
+    if constexpr (kPlayerMasterClock == PlayerMasterClock::audio) {
+        next_frame = static_cast<size_t>(std::floor(playback.audio_pts * playback.fps))
+            % playback.frames.size();
+        video_pts = static_cast<double>(next_frame) / playback.fps;
+    } else {
+        const std::chrono::duration<double> elapsed =
+            PlaybackState::Clock::now() - playback.start_time;
+        video_pts = loop_clock_seconds(elapsed.count(), playback.loop_duration);
+        next_frame = static_cast<size_t>(video_pts * playback.fps) % playback.frames.size();
+    }
+
     if (next_frame != playback.current_frame) {
         playback.current_frame = next_frame;
         upload_frame(playback.frames[playback.current_frame]);
     }
 
     playback.video_pts = video_pts;
-    playback.av_delta_ms = (playback.video_pts - playback.audio_pts) * 1000.0;
+    playback.av_delta_ms =
+        loop_delta_seconds(playback.video_pts, playback.audio_pts, playback.loop_duration) * 1000.0;
 }
 
 void render(const Renderer &renderer,
