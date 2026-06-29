@@ -93,8 +93,9 @@ struct PlaybackState
     double loop_duration = 0.0;
     size_t current_frame = std::numeric_limits<size_t>::max();
     bool frame_changed = false;
-    bool video_start_delay_initialized = false;
-    double video_start_delay_seconds = 0.0;
+    double video_pts = 0.0;
+    double audio_pts = 0.0;
+    double av_delta_seconds = 0.0;
 };
 
 struct DiagnosticsState
@@ -262,18 +263,22 @@ double steady_clock_seconds(const PlaybackState &playback)
     return elapsed.count();
 }
 
-double video_clock_seconds(PlaybackState &playback, double raw_steady_pts, double raw_audio_pts)
+double loop_delta_seconds(double video_pts, double audio_pts, double loop_duration)
 {
-    if (!playback.video_start_delay_initialized) {
-        if (raw_audio_pts <= 0.0) {
-            return 0.0;
-        }
-
-        playback.video_start_delay_seconds = std::max(0.0, raw_steady_pts - raw_audio_pts);
-        playback.video_start_delay_initialized = true;
+    double delta = video_pts - audio_pts;
+    if (loop_duration <= 0.0) {
+        return delta;
     }
 
-    return std::max(0.0, raw_steady_pts - playback.video_start_delay_seconds);
+    delta = std::fmod(delta, loop_duration);
+    const double half_loop = loop_duration / 2.0;
+    if (delta > half_loop) {
+        delta -= loop_duration;
+    } else if (delta < -half_loop) {
+        delta += loop_duration;
+    }
+
+    return delta;
 }
 
 void draw_textured_fullscreen_quad(const Renderer &renderer)
@@ -328,13 +333,14 @@ void print_diagnostics_if_due(const PlaybackState &playback, DiagnosticsState &d
         static_cast<double>(diagnostics.advanced_frames) / elapsed.count();
 
     if (first_line) {
-        std::cout << "Video start delay: " << playback.video_start_delay_seconds * 1000.0 << " ms\n"
+        std::cout << "Video clock: steady fps-based; audio clock: diagnostics only\n"
                   << std::flush;
         first_line = false;
     }
 
     std::cout << std::fixed << std::setprecision(2) << "Render FPS: " << measured_fps << " | "
-              << "Frame FPS: " << measured_frame_fps << "\n"
+              << "Frame FPS: " << measured_frame_fps << " | "
+              << "AV delta: " << playback.av_delta_seconds * 1000.0 << " ms\n"
               << std::flush;
 
     diagnostics.has_printed_report = true;
@@ -345,11 +351,15 @@ void print_diagnostics_if_due(const PlaybackState &playback, DiagnosticsState &d
 
 void update(PlaybackState &playback)
 {
-    const double raw_audio_pts = audio_clock_seconds(playback.audio_state, playback.audio_stream);
-    const double raw_steady_pts = steady_clock_seconds(playback);
-    const double video_clock = video_clock_seconds(playback, raw_steady_pts, raw_audio_pts);
-    const double video_pts = loop_clock_seconds(video_clock, playback.loop_duration);
-    const size_t next_frame = frame_index_from_pts(video_pts, playback.fps, playback.frames.size());
+    playback.audio_pts = loop_clock_seconds(audio_clock_seconds(playback.audio_state, playback.audio_stream),
+                                            playback.loop_duration);
+    playback.video_pts = loop_clock_seconds(steady_clock_seconds(playback), playback.loop_duration);
+    playback.av_delta_seconds = loop_delta_seconds(playback.video_pts,
+                                                   playback.audio_pts,
+                                                   playback.loop_duration);
+    const size_t next_frame = frame_index_from_pts(playback.video_pts,
+                                                   playback.fps,
+                                                   playback.frames.size());
 
     playback.frame_changed = next_frame != playback.current_frame;
     if (next_frame != playback.current_frame) {

@@ -104,4 +104,4 @@ The repository contains real `stb_image.h` and `stb_image_write.h` headers under
 
 ## Player notes
 
-The player decodes audio through the IMA ADPCM path and frames through the MJPEG-like path, then uses SDL3 for events/audio and OpenGL for texture presentation. Video frame selection is driven by the audio clock and loops back to the first frame. The audio callback continuously wraps the PCM buffer without inserting silence between loops. A waveform discontinuity at the loop point can still click if the WAV itself is not loop-friendly.
+The player decodes audio through the IMA ADPCM path and frames through the MJPEG-like path, then uses SDL3 for events/audio and OpenGL for texture presentation. Video frame selection is driven strictly by steady-clock elapsed time and the configured fps, while the audio clock is used only for startup alignment and diagnostics. The audio callback continuously wraps the PCM buffer without inserting silence between loops. A waveform discontinuity at the loop point can still click if the WAV itself is not loop-friendly.
