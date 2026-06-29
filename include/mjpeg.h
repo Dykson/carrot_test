@@ -11,4 +11,5 @@ ImageRgb load_png_rgb(const std::string& path);
 void save_png_rgb(const std::string& path, const ImageRgb& image);
 std::vector<MjpegFrame> encode_folder(const std::string& folder, int quality);
 void decode_folder(const std::vector<MjpegFrame>& frames, const std::string& folder);
+void write_mjpeg_stream(const std::string& path, const std::vector<MjpegFrame>& frames);
 }

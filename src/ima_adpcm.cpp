@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <array>
+#include <fstream>
 #include <stdexcept>
+#include <string>
 
 namespace carrot {
 namespace {
@@ -22,6 +24,19 @@ constexpr std::array<int, 16> kIndexTable = {
     -1, -1, -1, -1, 2, 4, 6, 8,
     -1, -1, -1, -1, 2, 4, 6, 8,
 };
+
+
+void write_u16(std::ostream& stream, uint16_t value) {
+    stream.put(static_cast<char>(value & 0xFF));
+    stream.put(static_cast<char>((value >> 8) & 0xFF));
+}
+
+void write_u32(std::ostream& stream, uint32_t value) {
+    stream.put(static_cast<char>(value & 0xFF));
+    stream.put(static_cast<char>((value >> 8) & 0xFF));
+    stream.put(static_cast<char>((value >> 16) & 0xFF));
+    stream.put(static_cast<char>((value >> 24) & 0xFF));
+}
 
 int16_t clamp_to_pcm16(int value) {
     return static_cast<int16_t>(std::clamp(value, -32768, 32767));
@@ -155,6 +170,30 @@ std::vector<int16_t> ImaAdpcmDecoder::decode(
     }
 
     return pcm;
+}
+
+
+void write_ima_adpcm_stream(const std::string& path,
+                            const std::vector<ImaAdpcmBlock>& blocks,
+                            uint16_t channels,
+                            uint32_t sample_rate) {
+    std::ofstream file(path, std::ios::binary);
+    if (!file) {
+        throw std::runtime_error("cannot create ADPCM file: " + path);
+    }
+
+    file.write("CADP", 4);
+    write_u16(file, channels);
+    write_u32(file, sample_rate);
+    write_u32(file, static_cast<uint32_t>(blocks.size()));
+
+    for (const ImaAdpcmBlock& block : blocks) {
+        write_u16(file, static_cast<uint16_t>(block.predictor));
+        file.put(static_cast<char>(block.step_index));
+        write_u32(file, static_cast<uint32_t>(block.nibbles.size()));
+        file.write(reinterpret_cast<const char*>(block.nibbles.data()),
+                   static_cast<std::streamsize>(block.nibbles.size()));
+    }
 }
 
 }  // namespace carrot
