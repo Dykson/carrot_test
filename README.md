@@ -15,7 +15,7 @@ C++17 educational media-codec project for a live-broadcasting-oriented test assi
   * compact project-local `SJR3` frame payloads inside a `CMJ2` stream writer.
 * PNG input/output through `stb_image.h` and `stb_image_write.h` only for image I/O.
 * Optional SDL3/OpenGL player when dependencies are available.
-* `carrot_selftest` smoke tests for codec edge cases.
+* Optional `carrot_selftest` smoke tests for codec edge cases.
 
 ## Build
 
@@ -34,7 +34,7 @@ cmake -S . -B build -DCARROT_BUILD_SELFTEST=ON
 Targets:
 
 * `codec_tool` is always built.
-* `carrot_selftest` is built when `CARROT_BUILD_SELFTEST=ON` (default).
+* `carrot_selftest` is built when `CARROT_BUILD_SELFTEST=ON` (disabled by default).
 * `codec_tool player ...` is compiled only when `CARROT_BUILD_PLAYER=ON` and CMake finds SDL3 plus a `glad/gl.h` include path. There are no hard-coded absolute SDL paths.
 
 ## Usage
@@ -48,7 +48,7 @@ Audio ADPCM round trip:
 Video MJPEG-like round trip over a folder of PNG frames:
 
 ```bash
-./build/codec_tool mjpeg frames_png decoded_frames
+./build/codec_tool mjpeg frames_png decoded_frames 85
 ```
 
 The PNG frame list is collected first and sorted lexicographically before encoding, so names such as `frame_0001.png`, `frame_0002.png`, and `frame_0010.png` play in the expected order.
@@ -65,10 +65,10 @@ Self tests:
 ./build/carrot_selftest
 ```
 
-The command-line round trips and player path write demonstration intermediate streams under `media/`:
+The command-line ADPCM and MJPEG round trips write demonstration intermediate streams under `media/out`:
 
-* `media/audio.adpcm` for the ADPCM channel blocks;
-* `media/video.mjpeg` for the project-local MJPEG-like frame stream.
+* `media/out/audio.cadp` for the ADPCM channel blocks;
+* `media/out/video.mjpeg` for the project-local MJPEG-like frame stream.
 
 ## IMA ADPCM notes
 
@@ -104,4 +104,4 @@ The repository contains real `stb_image.h` and `stb_image_write.h` headers under
 
 ## Player notes
 
-The player decodes audio through the IMA ADPCM path and frames through the MJPEG-like path, then uses SDL3 for events/audio and OpenGL for texture presentation. Video frame selection is driven by the audio clock and loops back to the first frame. The audio callback continuously wraps the PCM buffer without inserting silence between loops. A waveform discontinuity at the loop point can still click if the WAV itself is not loop-friendly.
+The player decodes audio through the IMA ADPCM path and frames through the MJPEG-like path, then uses SDL3 for events/audio and OpenGL for texture presentation. Video frame selection is driven strictly by steady-clock elapsed time and the configured fps, while the audio clock is used only for startup alignment and diagnostics. The audio callback continuously wraps the PCM buffer without inserting silence between loops. A waveform discontinuity at the loop point can still click if the WAV itself is not loop-friendly.
